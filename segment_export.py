@@ -19,6 +19,11 @@ For each video + its ASD result from active_speaker.py:
       Watermarks are NOT filtered here; handle downstream with aesthetic scoring
       if needed (they don't appear in every video).
 
+Slides / voice-over scenes with no visible speaker are discarded automatically:
+  detect_track.py produces no face tracks → active_speaker.py has nothing to score
+  → this stage finds no frames with exactly one active track → no clips written.
+  No explicit filter is needed.
+
 Output per clip:
   <out_dir>/<video_stem>/<video_stem>_<track_id>_<start_frame>_<end_frame>.mp4
   <out_dir>/<video_stem>/<video_stem>_<track_id>_<start_frame>_<end_frame>.json
