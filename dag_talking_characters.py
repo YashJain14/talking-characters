@@ -82,28 +82,30 @@ def task_ingest(csv_path: str, workers: int):
 
 
 @task(name="detect_track", retries=1)
-def task_detect_track(num_gpus: int):
+def task_detect_track(num_gpus: int, actors_per_gpu: int):
     p = _paths()
     _run([
         sys.executable,
         str(Path(__file__).parent / "detect_track.py"),
-        "--video_dir", str(p["videos"]),
-        "--out_dir",   str(p["tracks"]),
-        "--num_gpus",  str(num_gpus),
+        "--video_dir",      str(p["videos"]),
+        "--out_dir",        str(p["tracks"]),
+        "--num_gpus",       str(num_gpus),
+        "--actors_per_gpu", str(actors_per_gpu),
     ], "detect_track")
 
 
 @task(name="active_speaker", retries=1)
-def task_active_speaker(num_gpus: int, asd_model: str):
+def task_active_speaker(num_gpus: int, actors_per_gpu: int, asd_model: str):
     p = _paths()
     _run([
         sys.executable,
         str(Path(__file__).parent / "active_speaker.py"),
-        "--video_dir",  str(p["videos"]),
-        "--track_dir",  str(p["tracks"]),
-        "--out_dir",    str(p["asd"]),
-        "--num_gpus",   str(num_gpus),
-        "--asd_model",  asd_model,
+        "--video_dir",      str(p["videos"]),
+        "--track_dir",      str(p["tracks"]),
+        "--out_dir",        str(p["asd"]),
+        "--num_gpus",       str(num_gpus),
+        "--actors_per_gpu", str(actors_per_gpu),
+        "--asd_model",      asd_model,
     ], "active_speaker")
 
 
@@ -135,6 +137,7 @@ def task_segment_export(
 def talking_characters_pipeline(
     csv_path:        str,
     num_gpus:        int   = 4,
+    actors_per_gpu:  int   = 1,
     ingest_workers:  int   = 4,
     asd_model:       str   = "loconet",
     speak_threshold: float = 0.5,
@@ -177,10 +180,10 @@ def talking_characters_pipeline(
         task_ingest(csv_path, ingest_workers)
 
     if stage_idx <= STAGES.index("detect_track"):
-        task_detect_track(num_gpus)
+        task_detect_track(num_gpus, actors_per_gpu)
 
     if stage_idx <= STAGES.index("active_speaker"):
-        task_active_speaker(num_gpus, asd_model)
+        task_active_speaker(num_gpus, actors_per_gpu, asd_model)
 
     if stage_idx <= STAGES.index("segment_export"):
         task_segment_export(
@@ -199,6 +202,10 @@ def main():
     ap.add_argument("--csv",             required=True,
                     help="CSV of YouTube URLs to download (columns: url, label[optional])")
     ap.add_argument("--num_gpus",        type=int,   default=4)
+    ap.add_argument("--actors_per_gpu",  type=int,   default=1,
+                    help="Ray actors per GPU (1=safe for Colab/single GPU, "
+                         "4 for detect_track on A100, 2 for active_speaker on A100). "
+                         "The PBS script sets this to the correct value for the cluster.")
     ap.add_argument("--ingest_workers",  type=int,   default=4,
                     help="Parallel yt-dlp download threads")
     ap.add_argument("--asd_model",       default="loconet",
@@ -216,6 +223,7 @@ def main():
     talking_characters_pipeline(
         csv_path=args.csv,
         num_gpus=args.num_gpus,
+        actors_per_gpu=args.actors_per_gpu,
         ingest_workers=args.ingest_workers,
         asd_model=args.asd_model,
         speak_threshold=args.speak_threshold,

@@ -168,7 +168,7 @@ class _ByteTracker:
         return np.array(out, dtype=np.float32)
 
 
-@ray.remote(num_gpus=1.0 / ACTORS_PER_GPU)
+@ray.remote(num_gpus=1.0)
 class DetectTrackWorker:
     def __init__(self):
         self._log = logging.getLogger("detect_track.worker")
@@ -247,21 +247,28 @@ class DetectTrackWorker:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--video_dir", required=True)
-    ap.add_argument("--out_dir",   required=True)
-    ap.add_argument("--num_gpus",  type=int, default=1)
+    ap.add_argument("--video_dir",      required=True)
+    ap.add_argument("--out_dir",        required=True)
+    ap.add_argument("--num_gpus",       type=int, default=1)
+    ap.add_argument("--actors_per_gpu", type=int, default=ACTORS_PER_GPU,
+                    help="Ray actors per GPU. Default 4 (0.25 GPU each) for A100. "
+                         "Use 1 on single-GPU machines with limited RAM (e.g. Colab T4).")
     args = ap.parse_args()
 
     videos   = sorted(Path(args.video_dir).rglob("*.mp4"))
-    n_actors = args.num_gpus * ACTORS_PER_GPU
+    n_actors = args.num_gpus * args.actors_per_gpu
+    gpu_per_actor = 1.0 / args.actors_per_gpu
     log.info(f"Found {len(videos)} videos")
-    log.info(f"Actors: {n_actors} (1 per GPU × {args.num_gpus} GPUs)")
+    log.info(f"Actors: {n_actors} ({args.actors_per_gpu}/GPU × {args.num_gpus} GPUs, "
+             f"{gpu_per_actor:.2f} GPU each)")
 
     wandb.init(project="talking-characters", entity="rlx-labs",
                name="detect-track", resume="allow")
 
     ray.init(num_gpus=args.num_gpus, ignore_reinit_error=True)
-    workers = [DetectTrackWorker.remote() for _ in range(n_actors)]
+    # Build actor class with the right GPU fraction at runtime
+    ActorClass = DetectTrackWorker.options(num_gpus=gpu_per_actor)
+    workers = [ActorClass.remote() for _ in range(n_actors)]
 
     futures = [
         workers[i % n_actors].process.remote(str(v), args.out_dir)

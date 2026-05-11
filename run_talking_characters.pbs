@@ -45,6 +45,8 @@ echo "Scratch: $SCRATCH_TC"
 INPUT_CSV="$PBS_O_WORKDIR/videos.csv"
 
 NUM_GPUS=4
+ACTORS_PER_GPU=4       # 0.25 GPU each on A100 — safe at 40GB VRAM per GPU
+                       # Use 1 on single-GPU / low-RAM machines (e.g. Colab)
 INGEST_WORKERS=4       # parallel yt-dlp download threads
 
 # ASD model: "loconet" (recommended, +3% mAP over TalkNet in multi-speaker)
@@ -71,6 +73,7 @@ FROM_STAGE="ingest"   # resume: ingest | detect_track | active_speaker | segment
 python dag_talking_characters.py \
     --csv             $INPUT_CSV       \
     --num_gpus        $NUM_GPUS        \
+    --actors_per_gpu  $ACTORS_PER_GPU  \
     --ingest_workers  $INGEST_WORKERS  \
     --asd_model       $ASD_MODEL       \
     --speak_threshold $SPEAK_THRESHOLD \

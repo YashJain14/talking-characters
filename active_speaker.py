@@ -180,7 +180,7 @@ def _load_light_asd(device: str):
     return model.to(device)
 
 
-@ray.remote(num_gpus=1.0 / ACTORS_PER_GPU)
+@ray.remote(num_gpus=1.0)
 class ASDWorker:
     def __init__(self, asd_model_name: str):
         self._log    = logging.getLogger("asd.worker")
@@ -285,7 +285,10 @@ def main():
     ap.add_argument("--video_dir",  required=True)
     ap.add_argument("--track_dir",  required=True)
     ap.add_argument("--out_dir",    required=True)
-    ap.add_argument("--num_gpus",   type=int, default=1)
+    ap.add_argument("--num_gpus",       type=int, default=1)
+    ap.add_argument("--actors_per_gpu", type=int, default=ACTORS_PER_GPU,
+                    help="Ray actors per GPU. Default 2 (0.5 GPU each) for A100. "
+                         "Use 1 on single-GPU machines with limited RAM (e.g. Colab T4).")
     ap.add_argument("--asd_model",  default=ASD_MODEL,
                     choices=["loconet", "light_asd"],
                     help="ASD model to use (loconet recommended for multi-speaker)")
@@ -303,16 +306,19 @@ def main():
         else:
             log.warning(f"No track file for {v.name} — skipping")
 
-    n_actors = args.num_gpus * ACTORS_PER_GPU
+    n_actors      = args.num_gpus * args.actors_per_gpu
+    gpu_per_actor = 1.0 / args.actors_per_gpu
     log.info(f"ASD on {len(runnable)} videos  model={args.asd_model}")
-    log.info(f"Actors: {n_actors} (1 per GPU × {args.num_gpus} GPUs)")
+    log.info(f"Actors: {n_actors} ({args.actors_per_gpu}/GPU × {args.num_gpus} GPUs, "
+             f"{gpu_per_actor:.2f} GPU each)")
 
     wandb.init(project="talking-characters", entity="rlx-labs",
                name="active-speaker", resume="allow",
                config={"asd_model": args.asd_model})
 
     ray.init(num_gpus=args.num_gpus, ignore_reinit_error=True)
-    workers = [ASDWorker.remote(args.asd_model) for _ in range(n_actors)]
+    ActorClass = ASDWorker.options(num_gpus=gpu_per_actor)
+    workers = [ActorClass.remote(args.asd_model) for _ in range(n_actors)]
 
     futures = [
         workers[i % n_actors].process.remote(vp, tp, args.out_dir)
