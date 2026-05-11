@@ -1,0 +1,18 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.log
+*.egg-info/
+.DS_Store
+
+# Scratch data — never commit large video/model files
+scratch/
+*.mp4
+*.pt
+*.npz
+*.index
+*.pth
+
+# PBS job output logs (large, generated per-run)
+talking_characters_output.log
