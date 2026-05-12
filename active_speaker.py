@@ -150,10 +150,13 @@ def _load_loconet(device: str):
             f"LoCoNet weights not found at {weights}. "
             "Run prefetch_models_talking_characters.py first."
         )
-    # LoCoNet expects the loconet package: pip install loconet
+    import sys
+    project_root = str(Path(__file__).parent)
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
     from loconet import LoCoNet
     model = LoCoNet()
-    state = torch.load(weights, map_location=device, weights_only=True)
+    state = torch.load(weights, map_location=device, weights_only=False)
     model.load_state_dict(state)
     model.eval()
     return model.to(device)
