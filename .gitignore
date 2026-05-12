@@ -8,7 +8,7 @@ __pycache__/
 
 # Scratch data — never commit large video/model files
 scratch/
-*.mp4
+
 *.pt
 *.npz
 *.index
@@ -19,4 +19,3 @@ talking_characters_output.log
 
 talking_character/
 wandb/
-output_clips/
