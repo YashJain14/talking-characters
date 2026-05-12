@@ -52,13 +52,17 @@ INGEST_WORKERS=4
 # SyncNet confidence threshold: median_dist - min_dist.
 # Typical values: speaking=3-10, non-speaking/silence=0-2.
 # Start at 3.0; raise to 5.0 once audio is confirmed working.
-SYNC_THRESHOLD=3.0
+SYNC_THRESHOLD=1.0
 
 GAP_BRIDGE_S=0.5   # bridge speaking gaps shorter than this
 MIN_CLIP_S=3.0
 MAX_CLIP_S=60.0
 
-FROM_STAGE=ingest   # resume: ingest | detect_track | syncnet_score | segment_export
+FROM_STAGE=syncnet_score   # resume: ingest | detect_track | syncnet_score | segment_export
+
+# Recompute sync with new threshold (passes flag is baked into the JSON)
+rm -f "$SCRATCH_TC"/sync/*.sync.json
+rm -rf "$SCRATCH_TC"/clips
 
 # ── GPU concurrency summary (1x V100-32GB) ───────────────────────────────────
 # ingest:         CPU-only → 4 yt-dlp threads
@@ -78,3 +82,10 @@ python dag_talking_characters.py \
     --from_stage      $FROM_STAGE
 
 echo "Job completed at $(date)"
+
+# ── Copy clips into repo for inspection ───────────────────────────────────────
+CLIPS_DEST="$HOME/talking-characters/output_clips"
+mkdir -p "$CLIPS_DEST"
+cp -r "$SCRATCH_TC/clips/"*/*.mp4 "$CLIPS_DEST/" 2>/dev/null || true
+cp "$SCRATCH_TC/clips/segments.json" "$CLIPS_DEST/" 2>/dev/null || true
+echo "Clips copied to $CLIPS_DEST  ($(ls "$CLIPS_DEST"/*.mp4 2>/dev/null | wc -l) mp4s)"

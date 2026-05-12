@@ -58,7 +58,7 @@ import torch.nn.functional as F
 import ray
 import wandb
 
-SYNC_THRESHOLD = 3.0     # min confidence to pass (median_dist - min_dist); overridden by --sync_threshold
+SYNC_THRESHOLD = 1.0     # min confidence to pass (median_dist - min_dist); overridden by --sync_threshold
 FACE_SIZE      = 224     # face crop size fed to SyncNet visual stream (official repo uses 224)
 CROP_PAD       = 0.25    # padding around face bbox for SyncNet (tighter than export)
 AUDIO_SR       = 16000
