@@ -68,7 +68,7 @@ GAP_BRIDGE_S=0.5   # merge speaking gaps shorter than this (natural pauses)
 MIN_CLIP_S=3.0     # discard clips shorter than this
 MAX_CLIP_S=60.0    # discard clips longer than this
 
-FROM_STAGE="ingest"   # resume: ingest | detect_track | active_speaker | segment_export
+FROM_STAGE="active_speaker"   # resume: ingest | detect_track | active_speaker | segment_export
 
 # ── GPU concurrency summary (1x V100-32GB) ───────────────────────────────────
 # ingest:         CPU-only → 4 yt-dlp threads

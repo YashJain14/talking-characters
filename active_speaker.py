@@ -215,13 +215,21 @@ class ASDWorker:
                 out_path.write_text(json.dumps(result))
                 return {"path": video_path, "status": "ok", "n_tracks": 0}
 
-            # Decode all frames for face crops (CPU PyAV — no fractional GPU issues
-            # here since we own 1.0 GPU, but PyNvVideoCodec can be used too)
+            # Collect only the frame indices needed across all tracks, then
+            # decode once — avoids loading the full video into RAM.
             import av
-            raw_frames = []
+            needed = set()
+            for detections in tracks.values():
+                for d in detections:
+                    needed.add(d["frame"])
+
+            frame_cache: dict[int, np.ndarray] = {}
             with av.open(video_path) as container:
-                for frame in container.decode(video=0):
-                    raw_frames.append(frame.to_ndarray(format="rgb24"))
+                for fi, frame in enumerate(container.decode(video=0)):
+                    if fi in needed:
+                        frame_cache[fi] = frame.to_ndarray(format="rgb24")
+                    if len(frame_cache) == len(needed):
+                        break  # got everything we need
 
             wav = _extract_audio(video_path)
 
@@ -233,8 +241,8 @@ class ASDWorker:
                 # Build face crop sequence
                 face_crops = []
                 for fi, bbox in zip(frame_indices, bboxes):
-                    if fi < len(raw_frames):
-                        crop = _crop_face(raw_frames[fi], bbox, CROP_PAD_ASD)
+                    if fi in frame_cache:
+                        crop = _crop_face(frame_cache[fi], bbox, CROP_PAD_ASD)
                     else:
                         crop = np.zeros((FACE_SIZE, FACE_SIZE, 3), dtype=np.uint8)
                     face_crops.append(crop)
