@@ -58,10 +58,12 @@ GAP_BRIDGE_S=0.5   # bridge speaking gaps shorter than this
 MIN_CLIP_S=3.0
 MAX_CLIP_S=60.0
 
-FROM_STAGE=syncnet_score   # resume: ingest | detect_track | syncnet_score | segment_export
+FROM_STAGE=ingest   # resume: ingest | detect_track | syncnet_score | segment_export
 
-# Clear stale sync cache so audio fix takes effect on re-score
-rm -f "$SCRATCH_TC"/sync/*.sync.json
+# Clear stale caches: video had no audio stream, must re-download and re-score
+rm -f "$SCRATCH_TC"/raw_videos/unlabelled/.*.done   # force re-download
+rm -f "$SCRATCH_TC"/raw_videos/unlabelled/*.mp4     # delete video-only file
+rm -f "$SCRATCH_TC"/sync/*.sync.json                # delete silence-scored sync results
 
 # ── GPU concurrency summary (1x V100-32GB) ───────────────────────────────────
 # ingest:         CPU-only → 4 yt-dlp threads

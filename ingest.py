@@ -119,8 +119,9 @@ def _download(entry: dict, out_dir: Path, format_str: str) -> dict:
             "--no-playlist",
             "--quiet",
             "--no-warnings",
-            # Merge video+audio into mp4
+            # Merge video+audio into mp4; require ffmpeg for remux
             "--merge-output-format", "mp4",
+            "--remux-video", "mp4",
             # Don't embed subtitles/thumbnails — keep it lean
             "--no-embed-subs",
             "--no-embed-thumbnail",
@@ -128,8 +129,22 @@ def _download(entry: dict, out_dir: Path, format_str: str) -> dict:
         ]
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
+            log.error(f"yt-dlp failed for {url}:\n{result.stderr.strip()[-500:]}")
             return {"url": url, "status": f"failed: {result.stderr.strip()[:200]}",
                     "path": ""}
+
+        # Verify the downloaded file has an audio stream
+        mp4s = sorted(dest.glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if mp4s:
+            probe = subprocess.run(
+                ["ffmpeg", "-i", str(mp4s[0])],
+                capture_output=True, text=True,
+            )
+            if "Audio:" not in probe.stderr:
+                log.warning(
+                    f"Downloaded file has no audio stream: {mp4s[0].name}\n"
+                    f"ffmpeg info: {probe.stderr[-300:]}"
+                )
 
         # Find the downloaded file
         mp4s = sorted(dest.glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)
@@ -151,7 +166,7 @@ def main():
                     help="Output directory. Defaults to $SCRATCH_TC/raw_videos")
     ap.add_argument("--workers",   type=int, default=4,
                     help="Parallel download threads (yt-dlp is I/O bound)")
-    ap.add_argument("--format",    default="bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+    ap.add_argument("--format",    default="bestvideo[height<=1080]+bestaudio/best",
                     help="yt-dlp format selector")
     ap.add_argument("--limit",     type=int, default=None,
                     help="Max number of videos to download (useful for testing)")
