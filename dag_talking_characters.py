@@ -79,6 +79,7 @@ def run_pipeline(
     gap_bridge_s:    float = 0.5,
     min_clip_s:      float = 3.0,
     max_clip_s:      float = 60.0,
+    min_face_px:     int   = 64,
     from_stage:      str   = "ingest",
 ):
     wandb.init(
@@ -93,6 +94,7 @@ def run_pipeline(
             "gap_bridge_s":   gap_bridge_s,
             "min_clip_s":     min_clip_s,
             "max_clip_s":     max_clip_s,
+            "min_face_px":    min_face_px,
             "from_stage":     from_stage,
         },
     )
@@ -117,6 +119,7 @@ def run_pipeline(
                 "--out_dir",        str(p["tracks"]),
                 "--num_gpus",       str(num_gpus),
                 "--actors_per_gpu", str(actors_per_gpu),
+                "--min_face_px",    str(min_face_px),
             ], "detect_track")
 
         if stage_idx <= STAGES.index("syncnet_score"):
@@ -158,6 +161,8 @@ def main():
     ap.add_argument("--gap_bridge_s",   type=float, default=0.5)
     ap.add_argument("--min_clip_s",     type=float, default=3.0)
     ap.add_argument("--max_clip_s",     type=float, default=60.0)
+    ap.add_argument("--min_face_px",    type=int,   default=64,
+                    help="Min face size in pixels (default 64). Lower = include wider shots.")
     ap.add_argument("--from_stage",     default="ingest", choices=STAGES)
     args = ap.parse_args()
 
@@ -170,6 +175,7 @@ def main():
         gap_bridge_s=args.gap_bridge_s,
         min_clip_s=args.min_clip_s,
         max_clip_s=args.max_clip_s,
+        min_face_px=args.min_face_px,
         from_stage=args.from_stage,
     )
 

@@ -59,7 +59,7 @@ import ray
 import wandb
 
 
-MIN_FACE_PX    = 128   # discard faces smaller than this in either dimension
+MIN_FACE_PX    = 64    # discard faces smaller than this in either dimension
 ACTORS_PER_GPU = 4     # 0.25 GPU/actor → 16 concurrent across 4 A100s
 
 logging.basicConfig(level=logging.INFO,
@@ -310,14 +310,18 @@ class DetectTrackWorker:
 
 
 def main():
+    global MIN_FACE_PX
     ap = argparse.ArgumentParser()
     ap.add_argument("--video_dir",      required=True)
     ap.add_argument("--out_dir",        required=True)
     ap.add_argument("--num_gpus",       type=int, default=1)
+    ap.add_argument("--min_face_px",    type=int, default=MIN_FACE_PX,
+                    help="Minimum face size in pixels (default 64). Lower = more tracks from wide shots.")
     ap.add_argument("--actors_per_gpu", type=int, default=ACTORS_PER_GPU,
                     help="Ray actors per GPU. Default 4 (0.25 GPU each) for A100. "
                          "Use 1 on single-GPU machines with limited RAM (e.g. Colab T4).")
     args = ap.parse_args()
+    MIN_FACE_PX = args.min_face_px
 
     videos   = sorted(Path(args.video_dir).rglob("*.mp4"))
     n_actors = args.num_gpus * args.actors_per_gpu

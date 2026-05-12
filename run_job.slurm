@@ -50,13 +50,17 @@ ACTORS_PER_GPU=1
 INGEST_WORKERS=4
 
 # SyncNet confidence threshold: median_dist - min_dist.
-# Typical values: speaking=3-10, non-speaking/silence=0-2.
-# Start at 3.0; raise to 5.0 once audio is confirmed working.
-SYNC_THRESHOLD=1.0
+# solo close-ups typically score 1.0-3.0; two-person shots 0.1-0.9
+# 0.3 captures most two-person shots while filtering pure noise
+SYNC_THRESHOLD=0.3
 
 GAP_BRIDGE_S=0.5   # bridge speaking gaps shorter than this
 MIN_CLIP_S=3.0
 MAX_CLIP_S=60.0
+
+# Minimum face size: 64px captures two-person and some panel shots
+# (was 128 — that dropped 56k panel shot detections)
+MIN_FACE_PX=64
 
 FROM_STAGE=detect_track   # resume: ingest | detect_track | syncnet_score | segment_export
 
@@ -81,6 +85,7 @@ python dag_talking_characters.py \
     --gap_bridge_s    $GAP_BRIDGE_S    \
     --min_clip_s      $MIN_CLIP_S      \
     --max_clip_s      $MAX_CLIP_S      \
+    --min_face_px     $MIN_FACE_PX     \
     --from_stage      $FROM_STAGE
 
 echo "Job completed at $(date)"
