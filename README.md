@@ -36,8 +36,9 @@ Orchestrated by `dag_talking_characters.py`. Resume from any stage with `--from_
 ### One-time setup (login node only)
 
 ```bash
-bash setup_env.sh
+python -m venv talking_character
 source talking_character/bin/activate
+pip install -r requirements.txt
 python prefetch_models_talking_characters.py   # downloads SyncNet weights
 export WANDB_API_KEY=<your_key>
 ```
@@ -123,6 +124,20 @@ Weights: `~/.cache/talking_characters/syncnet.pth`
 1. **Black bars** — scan row/col mean luminance < 16, crop if found
 2. **Two-person shot** — bisect frame at midpoint between face centres, keep active-speaker half
 3. **Panel shots** — rejected entirely (face too small to crop cleanly at export resolution)
+
+---
+
+## Results & Limitations
+
+### Human Characters
+Results on human characters were generally good. The main failure mode was sideways/profile shots — SCRFD detects the face but SyncNet relies on frontal lip visibility, so active speaker identification degrades significantly when the character is not facing the camera.
+
+### Animated Characters
+The pipeline does not work for animated characters. SCRFD is trained on real human faces and misses or misdetects cartoon/animated faces. SyncNet similarly fails as it learned lip-sync from real video. Animated characters need separate tooling that operates beyond human face detection — e.g. character-specific detectors or audio-driven active speaker methods that don't rely on facial geometry.
+
+### Future Enhancements
+- **Watermark and overlay cropping** — YouTube watermarks, on-screen text, and graphical overlays are not currently handled. Detecting and cropping these regions out would improve clip quality for training.
+- **Animated character support** — requires tooling beyond human face detection; character-specific detectors or audio-driven active speaker methods not reliant on facial geometry.
 
 ---
 
