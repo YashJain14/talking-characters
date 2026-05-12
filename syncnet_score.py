@@ -203,13 +203,22 @@ def _load_syncnet(device: str) -> SyncNet:
 # Preprocessing helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _ffmpeg_exe() -> str:
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
+
+
 def _extract_audio(video_path: str, sr: int = AUDIO_SR) -> np.ndarray | None:
     import subprocess, tempfile, soundfile as sf
+    ffmpeg = _ffmpeg_exe()
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         tmp_path = tmp.name
     try:
         r = subprocess.run(
-            ["ffmpeg", "-y", "-i", video_path,
+            [ffmpeg, "-y", "-i", video_path,
              "-vn", "-ac", "1", "-ar", str(sr), "-acodec", "pcm_s16le", tmp_path],
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
         )

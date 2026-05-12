@@ -199,8 +199,14 @@ def _export_clip(
     vf      = f"scale={EXPORT_RES}:{EXPORT_RES}" if full else \
               f"crop={cw}:{ch}:{x1}:{y1},scale={EXPORT_RES}:{EXPORT_RES}"
 
+    try:
+        import imageio_ffmpeg
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        ffmpeg = "ffmpeg"
+
     cmd = [
-        "ffmpeg", "-y",
+        ffmpeg, "-y",
         "-ss", f"{start_s:.3f}", "-to", f"{end_s:.3f}",
         "-i", video_path,
         "-vf", vf,

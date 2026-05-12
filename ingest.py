@@ -86,6 +86,15 @@ def _load_csv(csv_path: str) -> list[dict]:
     return rows
 
 
+def _ffmpeg_exe() -> str:
+    """Return path to ffmpeg: imageio_ffmpeg bundled binary, else system ffmpeg."""
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
+
+
 def _download(entry: dict, out_dir: Path, format_str: str) -> dict:
     """
     Download one YouTube video via yt-dlp.
@@ -112,17 +121,17 @@ def _download(entry: dict, out_dir: Path, format_str: str) -> dict:
 
     t0 = time.perf_counter()
     try:
+        ffmpeg = _ffmpeg_exe()
         cmd = [
             "yt-dlp",
+            "--ffmpeg-location", ffmpeg,
             "--format", format_str,
             "--output", outtmpl,
             "--no-playlist",
             "--quiet",
             "--no-warnings",
-            # Merge video+audio into mp4; require ffmpeg for remux
             "--merge-output-format", "mp4",
             "--remux-video", "mp4",
-            # Don't embed subtitles/thumbnails — keep it lean
             "--no-embed-subs",
             "--no-embed-thumbnail",
             url,
@@ -136,10 +145,7 @@ def _download(entry: dict, out_dir: Path, format_str: str) -> dict:
         # Verify the downloaded file has an audio stream
         mp4s = sorted(dest.glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)
         if mp4s:
-            probe = subprocess.run(
-                ["ffmpeg", "-i", str(mp4s[0])],
-                capture_output=True, text=True,
-            )
+            probe = subprocess.run([ffmpeg, "-i", str(mp4s[0])], capture_output=True, text=True)
             if "Audio:" not in probe.stderr:
                 log.warning(
                     f"Downloaded file has no audio stream: {mp4s[0].name}\n"
