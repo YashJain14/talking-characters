@@ -94,31 +94,24 @@ def _extract_audio(video_path: str, sr: int = AUDIO_SR) -> np.ndarray | None:
         Path(tmp_path).unlink(missing_ok=True)
 
 
-def _mel_for_frames(wav: np.ndarray, sr: int, frame_indices: list[int],
-                    fps: float) -> np.ndarray:
+def _mel_spectrogram(wav: np.ndarray, sr: int, n_mels: int = 40) -> np.ndarray:
     """
-    Build mel spectrogram slices aligned to video frames.
-    Returns [N_frames, 13, T_mels] float32.
+    Compute mel spectrogram for the full audio waveform.
+    Returns [T_audio, n_mels] float32 where T_audio ≈ 4 * n_video_frames.
+    hop_length = sr/100 → 100 mel frames/sec → 4× a 25fps video.
     """
-    import python_speech_features
-    mfcc = python_speech_features.mfcc(
-        wav, sr, numcep=13, winlen=0.025, winstep=0.010,
-    )  # shape [T_mels, 13]
-
-    mels_per_frame = sr / (fps * 160)   # approx mel hops per video frame
-    slices = []
-    window = 4  # ±4 mel frames either side
-    for fi in frame_indices:
-        center = int(fi * mels_per_frame)
-        start  = max(0, center - window)
-        end    = min(len(mfcc), center + window + 1)
-        chunk  = mfcc[start:end]
-        # Pad to fixed length
-        pad    = 2 * window + 1 - len(chunk)
-        if pad > 0:
-            chunk = np.pad(chunk, ((0, pad), (0, 0)))
-        slices.append(chunk[:2*window+1])  # [9, 13]
-    return np.array(slices, dtype=np.float32)  # [N, 9, 13]
+    try:
+        import librosa
+        hop = sr // 100          # 160 samples @ 16kHz → 100 frames/sec
+        mel = librosa.feature.melspectrogram(
+            y=wav, sr=sr, n_mels=n_mels,
+            n_fft=512, hop_length=hop, win_length=400,
+        )                        # [n_mels, T]
+        mel = librosa.power_to_db(mel, ref=np.max)
+        return mel.T.astype(np.float32)  # [T, n_mels]
+    except ImportError:
+        # fallback: silence
+        return np.zeros((1, n_mels), dtype=np.float32)
 
 
 def _crop_face(frame: np.ndarray, bbox: list, pad: float) -> np.ndarray:
@@ -162,10 +155,12 @@ def _load_loconet(device: str):
     model = model.to(device)
 
     # Sanity: varied random inputs should produce varied logits
+    # face: [N, 1, 112, 112] grayscale normalised; audio: [1, 4*N, 40] mel
     with torch.inference_mode():
-        _f = torch.rand(4, 3, 112, 112, device=device)
-        _m = torch.rand(4, 9, 13, device=device)
-        _out = model(_f, _m)
+        N = 8
+        _f = torch.randn(N, 1, 112, 112, device=device)
+        _a = torch.randn(1, N * 4, 40, device=device)
+        _out = model(_f, _a)
         _probs = torch.sigmoid(_out)
         log.info(f"LoCoNet sanity — logits {[round(float(x),3) for x in _out]}, "
                  f"probs {[round(float(p),3) for p in _probs]}")
@@ -244,33 +239,59 @@ class ASDWorker:
 
             wav = _extract_audio(video_path)
 
+            # Build full mel spectrogram once for the whole video [T_audio, n_mels]
+            N_MELS = 40
+            if wav is not None:
+                mel_full = _mel_spectrogram(wav, AUDIO_SR, n_mels=N_MELS)
+            else:
+                mel_full = None
+
             asd_tracks = {}
             for track_id, detections in tracks.items():
                 frame_indices = [d["frame"] for d in detections]
                 bboxes        = [d["bbox"]  for d in detections]
+                N = len(frame_indices)
 
-                # Build face crop sequence
+                # Face crops: grayscale + normalise to (px/255 - 0.4161)/0.1688
+                import cv2
                 face_crops = []
                 for fi, bbox in zip(frame_indices, bboxes):
                     if fi in frame_cache:
                         crop = _crop_face(frame_cache[fi], bbox, CROP_PAD_ASD)
                     else:
                         crop = np.zeros((FACE_SIZE, FACE_SIZE, 3), dtype=np.uint8)
-                    face_crops.append(crop)
+                    gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY).astype(np.float32)
+                    gray = (gray / 255.0 - 0.4161) / 0.1688
+                    face_crops.append(gray)
 
+                # [N, 1, H, W]
                 face_tensor = (
-                    torch.from_numpy(np.stack(face_crops))          # [N, H, W, 3]
-                    .permute(0, 3, 1, 2)                            # [N, 3, H, W]
-                    .float().div(255.0)
+                    torch.from_numpy(np.stack(face_crops))   # [N, H, W]
+                    .unsqueeze(1)                             # [N, 1, H, W]
                     .to(self.device)
                 )
 
-                if wav is not None:
-                    mel = _mel_for_frames(wav, AUDIO_SR, frame_indices, fps)
-                    mel_tensor = torch.from_numpy(mel).to(self.device)  # [N, 9, 13]
+                # Slice mel spectrogram to cover this track's frame range
+                # T_audio ≈ 4 * N_video_frames; take the slice for these frames
+                if mel_full is not None:
+                    start_f = frame_indices[0]
+                    end_f   = frame_indices[-1] + 1
+                    # audio at 100 fps, video at ~fps → audio_per_video = 100/fps
+                    aud_fps_ratio = 100.0 / fps
+                    a_start = int(start_f * aud_fps_ratio)
+                    a_end   = int(end_f   * aud_fps_ratio)
+                    mel_slice = mel_full[a_start:a_end]      # [T_audio_slice, n_mels]
+                    # Ensure T_audio ≈ 4*N for the encoder
+                    target_t = N * 4
+                    if len(mel_slice) == 0:
+                        mel_slice = np.zeros((target_t, N_MELS), dtype=np.float32)
+                    elif len(mel_slice) != target_t:
+                        # Resize to match
+                        mel_slice = mel_slice[:target_t] if len(mel_slice) > target_t else \
+                            np.pad(mel_slice, ((0, target_t - len(mel_slice)), (0, 0)))
+                    mel_tensor = torch.from_numpy(mel_slice).unsqueeze(0).to(self.device)  # [1, T_audio, n_mels]
                 else:
-                    mel_tensor = torch.zeros(len(frame_indices), 9, 13,
-                                             device=self.device)
+                    mel_tensor = torch.zeros(1, N * 4, N_MELS, device=self.device)
 
                 with torch.inference_mode():
                     scores = self._model(face_tensor, mel_tensor)  # [N] float
