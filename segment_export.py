@@ -46,6 +46,17 @@ MAX_CLIP_S      = 60.0
 MIN_FACE_RATIO  = 0.80   # face must be detected in ≥ 80% of clip frames
 BLACK_THRESHOLD = 16     # luminance below which a row/col is considered black bar
 EXPORT_RES      = 512    # output resolution (square)
+MIN_FACE_PX_SOLO = 150   # clips with face < this must be solo (n_faces_in_frame == 0)
+
+# Per-scene confidence thresholds based on how many other faces share the frame.
+# Solo close-ups score 1.0–3.0; two-person shots score 0.3–0.9 (nodders included).
+# Requiring 0.8 for two-person shots filters nodders (0.3–0.5) while keeping
+# real speakers (1.0+). Panel shots (≥2 others) are rejected entirely.
+CONF_THRESHOLD_BY_N_OTHER = {
+    0: 0.3,   # solo: low bar, SyncNet is reliable on close-ups
+    1: 0.8,   # two-person: high bar to filter nodders
+}
+# any n_other >= 2 → rejected (panel shot, face too small to crop cleanly)
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -119,6 +130,20 @@ def _find_clips(
                 "face_present_ratio": round(face_ratio, 4),
                 "sync_confidence":    sync["confidence"],
             })
+
+    # Winner-takes-all: for overlapping clips, keep only highest sync_confidence
+    clips.sort(key=lambda c: -c["sync_confidence"])
+    kept   = []
+    for clip in clips:
+        overlaps = any(
+            clip["start_frame"] <= k["end_frame"] and clip["end_frame"] >= k["start_frame"]
+            for k in kept
+        )
+        if overlaps:
+            rejected.append({**clip, "reject_reason": "overlap_lost_to_higher_conf"})
+        else:
+            kept.append(clip)
+    clips = kept
 
     return clips, rejected
 
@@ -337,6 +362,37 @@ class SegmentWorker:
                     median_face_px = round(float(np.median(face_sizes)), 1)
                 else:
                     median_face_px = 0.0
+
+                # Gate: reject panel shots (≥2 other faces) entirely — too small to crop cleanly
+                if n_faces_in_frame >= 2:
+                    log.info(f"    {name}: SKIP panel shot  n_other={n_faces_in_frame}  face={median_face_px:.0f}px")
+                    rejected_clips.append({
+                        "track_id": tid, "start_frame": sf, "end_frame": ef,
+                        "duration_s": round((ef-sf)/fps, 2),
+                        "reject_reason": "panel_shot",
+                        "median_face_px": median_face_px,
+                        "n_faces_in_frame": n_faces_in_frame,
+                        "sync_confidence": clip["sync_confidence"],
+                    })
+                    continue
+
+                # Gate: two-person shots require higher confidence to filter nodders
+                required_conf = CONF_THRESHOLD_BY_N_OTHER.get(n_faces_in_frame, 0.3)
+                if clip["sync_confidence"] < required_conf:
+                    log.info(
+                        f"    {name}: SKIP low conf for {n_faces_in_frame}-other scene"
+                        f"  conf={clip['sync_confidence']:.3f} < {required_conf}"
+                    )
+                    rejected_clips.append({
+                        "track_id": tid, "start_frame": sf, "end_frame": ef,
+                        "duration_s": round((ef-sf)/fps, 2),
+                        "reject_reason": f"low_conf_for_scene_type",
+                        "median_face_px": median_face_px,
+                        "n_faces_in_frame": n_faces_in_frame,
+                        "sync_confidence": clip["sync_confidence"],
+                        "required_conf": required_conf,
+                    })
+                    continue
 
                 ok, had_bars, had_other = _export_clip(
                     video_path, trk_tracks, tid, sf, ef, fps,

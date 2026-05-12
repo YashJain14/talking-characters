@@ -62,13 +62,11 @@ MAX_CLIP_S=60.0
 # (was 128 — that dropped 56k panel shot detections)
 MIN_FACE_PX=64
 
-FROM_STAGE=detect_track   # resume: ingest | detect_track | syncnet_score | segment_export
+FROM_STAGE=segment_export   # resume: ingest | detect_track | syncnet_score | segment_export
 
-# Full clean — remove all stage outputs so everything reruns fresh
-rm -rf "$SCRATCH_TC/tracks"
-rm -rf "$SCRATCH_TC/sync"
+# Only clear clips — tracks and sync are reused
 rm -rf "$SCRATCH_TC/clips"
-echo "Cleared tracks/ sync/ clips/ — running from $FROM_STAGE"
+echo "Cleared clips/ — running from $FROM_STAGE"
 
 # ── GPU concurrency summary (1x V100-32GB) ───────────────────────────────────
 # ingest:         CPU-only → 4 yt-dlp threads
