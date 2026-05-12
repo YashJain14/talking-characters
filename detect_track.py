@@ -200,7 +200,7 @@ class DetectTrackWorker:
                 result = tracker.update(dets, frame)
 
                 for row in result:
-                    x1, y1, x2, y2 = row[0], row[1], row[2], row[3]
+                    x1, y1, x2, y2 = float(row[0]), float(row[1]), float(row[2]), float(row[3])
                     track_id = int(row[4])
                     score    = float(row[5]) if len(row) > 5 else 1.0
 

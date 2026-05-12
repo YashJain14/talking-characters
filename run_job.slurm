@@ -50,7 +50,7 @@ echo "Scratch: $SCRATCH_TC"
 
 # ── Config ────────────────────────────────────────────────────────────────────
 # Path to your input CSV (see ingest.py for format: url, label columns)
-INPUT_CSV="$SLURM_SUBMIT_DIR/videos.csv"
+INPUT_CSV="$SLURM_SUBMIT_DIR/videos_test.csv"
 
 NUM_GPUS=1
 ACTORS_PER_GPU=1      # 1 GPU total — single actor per stage
