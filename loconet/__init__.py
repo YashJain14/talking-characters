@@ -196,7 +196,7 @@ class _VisualConv1D(nn.Module):
 # 5.  Audio encoder
 #     features.{0,3,6,8,11,13}  Conv2d (VGGish-lite)
 #     deconv   ConvTranspose2d(512, 256, kernel=(2,2), stride=(2,2))
-#     conv1    Conv2d(256, 256, 1)  (stored as Conv2d with 1×1 kernel)
+#     conv1    Conv2d(512, 256, 1)  — pools features[512] directly
 #     conv2    Conv2d(256, 128, 1)
 # ═══════════════════════════════════════════════════════════════
 
@@ -221,7 +221,7 @@ class _AudioEncoder(nn.Module):
             nn.ReLU(inplace=True),                # 14
         )
         self.deconv = nn.ConvTranspose2d(512, 256, kernel_size=(2,2), stride=(2,2), bias=True)
-        self.conv1  = nn.Conv2d(256, 256, 1, bias=True)
+        self.conv1  = nn.Conv2d(512, 256, 1, bias=True)
         self.conv2  = nn.Conv2d(256, 128, 1, bias=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -229,9 +229,7 @@ class _AudioEncoder(nn.Module):
         B, T, H, W = x.shape
         x = x.reshape(B*T, 1, H, W)
         x = self.features(x)                            # [B*T, 512, h', w']
-        x = F.adaptive_avg_pool2d(x, (2, 2))            # [B*T, 512, 2, 2]
-        x = F.relu(self.deconv(x), inplace=True)        # [B*T, 256, 4, 4]
-        x = F.adaptive_avg_pool2d(x, (1, 1))            # [B*T, 256, 1, 1]
+        x = F.adaptive_avg_pool2d(x, (1, 1))            # [B*T, 512, 1, 1]
         x = F.relu(self.conv1(x), inplace=True)         # [B*T, 256, 1, 1]
         x = self.conv2(x)                               # [B*T, 128, 1, 1]
         x = x.view(B, T, 128).permute(0, 2, 1)          # [B, 128, T]
