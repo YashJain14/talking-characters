@@ -81,6 +81,7 @@ MIN_ACTIVE_RATIO  = 0.60   # at least 60% of clip frames must be active-speaking
 MAX_ABSENT_RATIO  = 0.20   # discard if face missing > 20% of clip frames
 BLACK_THRESHOLD   = 16     # luminance (0-255) below which a row/col is "black"
 EXPORT_RES        = 512    # output resolution (width, height may differ post-crop)
+CROP_PAD          = 0.35   # proportional padding around face bbox for export crop
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(message)s",
