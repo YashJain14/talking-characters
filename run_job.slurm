@@ -48,9 +48,12 @@ export SCRATCH_TC="$HOME/scratch/talking-characters"
 mkdir -p "$SCRATCH_TC/raw_videos"
 echo "Scratch: $SCRATCH_TC"
 
-# ── Prefect: isolated home per job to avoid stale/corrupt SQLite DB ───────────
-export PREFECT_HOME="$SCRATCH_TC/prefect_home_${SLURM_JOB_ID}"
-mkdir -p "$PREFECT_HOME"
+# ── Prefect: fresh DB per job — bypasses stale ~/.prefect/prefect.db entirely ──
+_PREFECT_DIR="$SCRATCH_TC/prefect_${SLURM_JOB_ID}"
+mkdir -p "$_PREFECT_DIR"
+export PREFECT_HOME="$_PREFECT_DIR"
+export PREFECT_API_DATABASE_CONNECTION_URL="sqlite+aiosqlite:///$_PREFECT_DIR/prefect.db"
+export PREFECT_LOCAL_STORAGE_PATH="$_PREFECT_DIR/storage"
 
 # ── Config ────────────────────────────────────────────────────────────────────
 # Path to your input CSV (see ingest.py for format: url, label columns)
