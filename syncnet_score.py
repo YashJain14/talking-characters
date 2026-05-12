@@ -59,7 +59,7 @@ import ray
 import wandb
 
 SYNC_THRESHOLD = 5.0     # min mean confidence to consider a track as speaking
-FACE_SIZE      = 112     # face crop size fed to SyncNet visual stream
+FACE_SIZE      = 224     # face crop size fed to SyncNet visual stream (official repo uses 224)
 CROP_PAD       = 0.25    # padding around face bbox for SyncNet (tighter than export)
 AUDIO_SR       = 16000
 WINDOW_FRAMES  = 25      # SyncNet window: 25 video frames (1s at 25fps)
@@ -74,102 +74,99 @@ log = logging.getLogger("syncnet_score")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SyncNet model  (Chung & Zisserman ECCV 2016, syncnet_v2.model checkpoint)
+# SyncNet model — exact copy of syncnet_python/SyncNetModel.py class S
 #
-# Checkpoint key names (flat on the model, no submodule wrappers):
-#   netcnnlip.*  — visual (lip) CNN  — Conv3d stream
-#   netfclip.*   — visual FC
-#   netcnnaud.*  — audio CNN         — Conv2d stream
-#   netfcaud.*   — audio FC
-#
-# CNN index layout (same for both streams):
-#   0,1   Conv+BN   2  ReLU   3  Pool
-#   4,5   Conv+BN   6  ReLU   7  Pool
-#   8,9   Conv+BN   10 ReLU
-#   11,12 Conv+BN   13 ReLU
-#   14,15 Conv+BN   16 ReLU
-#   17    Pool
-#   18,19 Conv+BN   20 ReLU
+# Visual input : [B, 3, 5, H, W]  (RGB, 5 frames, H/W = face crop size)
+# Audio input  : [B, 1, 13, 20]   (1ch MFCC, 13 coeffs, 20 time steps)
+# Both streams output 1024-d embeddings.
+# Sync confidence = median(pairwise_dist) - min(pairwise_dist)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class SyncNet(nn.Module):
-    def __init__(self):
+    def __init__(self, num_layers_in_fc_layers: int = 1024):
         super().__init__()
-        # Visual (lip) stream: input [B, 1, 5, 112, 112]
-        self.netcnnlip = nn.Sequential(
-            nn.Conv3d(1,   96,  (5,7,7), stride=(1,2,2), padding=0),  # 0
-            nn.BatchNorm3d(96),                                         # 1
-            nn.ReLU(),                                                  # 2
-            nn.MaxPool3d((1,3,3), stride=(1,2,2)),                     # 3
-            nn.Conv3d(96,  256, (1,5,5), stride=(1,2,2), padding=(0,1,1)), # 4
-            nn.BatchNorm3d(256),                                        # 5
-            nn.ReLU(),                                                  # 6
-            nn.MaxPool3d((1,3,3), stride=(1,2,2)),                     # 7
-            nn.Conv3d(256, 256, (1,3,3), padding=(0,1,1)),             # 8
-            nn.BatchNorm3d(256),                                        # 9
-            nn.ReLU(),                                                  # 10
-            nn.Conv3d(256, 256, (1,3,3), padding=(0,1,1)),             # 11
-            nn.BatchNorm3d(256),                                        # 12
-            nn.ReLU(),                                                  # 13
-            nn.Conv3d(256, 256, (1,3,3), padding=(0,1,1)),             # 14
-            nn.BatchNorm3d(256),                                        # 15
-            nn.ReLU(),                                                  # 16
-            nn.MaxPool3d((1,3,3), stride=(1,2,2)),                     # 17
-            nn.Conv3d(256, 256, (1,1,1), padding=0),                   # 18
-            nn.BatchNorm3d(256),                                        # 19
-            nn.ReLU(),                                                  # 20
-        )
-        self.netfclip = nn.Sequential(
-            nn.Linear(256*1*2*2, 512),  # 0  flattened after last pool+conv: [B,256,1,2,2]
-            nn.BatchNorm1d(512),         # 1
-            nn.ReLU(),                   # 2
-            nn.Linear(512, 1024),        # 3
-        )
 
-        # Audio stream: input [B, 1, 13, 20]
         self.netcnnaud = nn.Sequential(
-            nn.Conv2d(1,   96,  (3,3), stride=(1,1), padding=(1,1)),  # 0
-            nn.BatchNorm2d(96),                                         # 1
-            nn.ReLU(),                                                  # 2
-            nn.MaxPool2d((1,1), stride=(1,1)),                         # 3
-            nn.Conv2d(96,  256, (3,3), stride=(1,1), padding=(1,1)),  # 4
-            nn.BatchNorm2d(256),                                        # 5
-            nn.ReLU(),                                                  # 6
-            nn.MaxPool2d((1,1), stride=(1,1)),                         # 7
-            nn.Conv2d(256, 384, (3,3), padding=(1,1)),                 # 8
-            nn.BatchNorm2d(384),                                        # 9
-            nn.ReLU(),                                                  # 10
-            nn.Conv2d(384, 256, (3,3), padding=(1,1)),                 # 11
-            nn.BatchNorm2d(256),                                        # 12
-            nn.ReLU(),                                                  # 13
-            nn.Conv2d(256, 256, (3,3), padding=(1,1)),                 # 14
-            nn.BatchNorm2d(256),                                        # 15
-            nn.ReLU(),                                                  # 16
-            nn.MaxPool2d((3,1), stride=(2,1)),                         # 17
-            nn.Conv2d(256, 256, (1,1), padding=0),                     # 18
-            nn.BatchNorm2d(256),                                        # 19
-            nn.ReLU(),                                                  # 20
+            nn.Conv2d(1, 64, kernel_size=(3,3), stride=(1,1), padding=(1,1)),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=(1,1), stride=(1,1)),
+
+            nn.Conv2d(64, 192, kernel_size=(3,3), stride=(1,1), padding=(1,1)),
+            nn.BatchNorm2d(192),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=(3,3), stride=(1,2)),
+
+            nn.Conv2d(192, 384, kernel_size=(3,3), padding=(1,1)),
+            nn.BatchNorm2d(384),
+            nn.ReLU(inplace=True),
+
+            nn.Conv2d(384, 256, kernel_size=(3,3), padding=(1,1)),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+
+            nn.Conv2d(256, 256, kernel_size=(3,3), padding=(1,1)),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=(3,3), stride=(2,2)),
+
+            nn.Conv2d(256, 512, kernel_size=(5,4), padding=(0,0)),
+            nn.BatchNorm2d(512),
+            nn.ReLU(),
         )
+
         self.netfcaud = nn.Sequential(
-            nn.Linear(256*1*20, 512),  # 0  (after pool: [B,256,1,20])
-            nn.BatchNorm1d(512),        # 1
-            nn.ReLU(),                  # 2
-            nn.Linear(512, 1024),       # 3
+            nn.Linear(512, 512),
+            nn.BatchNorm1d(512),
+            nn.ReLU(),
+            nn.Linear(512, num_layers_in_fc_layers),
         )
 
-    def forward(self, face_seq, mfcc_win):
-        # face_seq: [B, 1, 5, H, W]   mfcc_win: [B, 1, 13, 20]
-        v = self.netcnnlip(face_seq)
-        v = v.view(v.size(0), -1)
-        v = self.netfclip(v)                   # [B, 1024]
+        self.netfclip = nn.Sequential(
+            nn.Linear(512, 512),
+            nn.BatchNorm1d(512),
+            nn.ReLU(),
+            nn.Linear(512, num_layers_in_fc_layers),
+        )
 
-        a = self.netcnnaud(mfcc_win)
-        a = a.view(a.size(0), -1)
-        a = self.netfcaud(a)                   # [B, 1024]
+        self.netcnnlip = nn.Sequential(
+            nn.Conv3d(3, 96, kernel_size=(5,7,7), stride=(1,2,2), padding=0),
+            nn.BatchNorm3d(96),
+            nn.ReLU(inplace=True),
+            nn.MaxPool3d(kernel_size=(1,3,3), stride=(1,2,2)),
 
-        v = F.normalize(v, p=2, dim=1)
-        a = F.normalize(a, p=2, dim=1)
-        return (v * a).sum(dim=1)              # cosine similarity
+            nn.Conv3d(96, 256, kernel_size=(1,5,5), stride=(1,2,2), padding=(0,1,1)),
+            nn.BatchNorm3d(256),
+            nn.ReLU(inplace=True),
+            nn.MaxPool3d(kernel_size=(1,3,3), stride=(1,2,2), padding=(0,1,1)),
+
+            nn.Conv3d(256, 256, kernel_size=(1,3,3), padding=(0,1,1)),
+            nn.BatchNorm3d(256),
+            nn.ReLU(inplace=True),
+
+            nn.Conv3d(256, 256, kernel_size=(1,3,3), padding=(0,1,1)),
+            nn.BatchNorm3d(256),
+            nn.ReLU(inplace=True),
+
+            nn.Conv3d(256, 256, kernel_size=(1,3,3), padding=(0,1,1)),
+            nn.BatchNorm3d(256),
+            nn.ReLU(inplace=True),
+            nn.MaxPool3d(kernel_size=(1,3,3), stride=(1,2,2)),
+
+            nn.Conv3d(256, 512, kernel_size=(1,6,6), padding=0),
+            nn.BatchNorm3d(512),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward_lip(self, x):
+        mid = self.netcnnlip(x)
+        mid = mid.view(mid.size(0), -1)
+        return self.netfclip(mid)
+
+    def forward_aud(self, x):
+        mid = self.netcnnaud(x)
+        mid = mid.view(mid.size(0), -1)
+        return self.netfcaud(mid)
 
 
 def _load_syncnet(device: str) -> SyncNet:
@@ -183,20 +180,21 @@ def _load_syncnet(device: str) -> SyncNet:
             "Run prefetch_models_talking_characters.py first."
         )
     model = SyncNet()
-    state = torch.load(weights, map_location=device, weights_only=True)
-    # Handle DataParallel wrapper
-    if any(k.startswith("module.") for k in state):
-        state = {k[len("module."):]: v for k, v in state.items()}
-    # Log top-level key prefixes to aid debugging
-    prefixes = sorted({k.split(".")[0] for k in state})
-    log.info(f"SyncNet checkpoint top-level keys: {prefixes}")
-    missing, unexpected = model.load_state_dict(state, strict=False)
+    # Use the same loading method as the official syncnet_python repo:
+    # copy_ each param by name rather than load_state_dict (avoids strict mismatch)
+    loaded_state = torch.load(weights, map_location="cpu", weights_only=True)
+    self_state   = model.state_dict()
+    log.info(f"SyncNet checkpoint keys: {sorted({k.split('.')[0] for k in loaded_state})}")
+    for name, param in loaded_state.items():
+        if name in self_state:
+            self_state[name].copy_(param)
+        else:
+            log.warning(f"SyncNet: unexpected key in checkpoint: {name}")
+    missing = [k for k in self_state if k not in loaded_state]
     if missing:
-        log.warning(f"SyncNet: {len(missing)} missing keys: {missing[:5]}...")
-    if unexpected:
-        log.warning(f"SyncNet: {len(unexpected)} unexpected keys: {unexpected[:5]}...")
-    if not missing and not unexpected:
-        log.info("SyncNet: weights loaded perfectly (strict)")
+        log.warning(f"SyncNet: {len(missing)} keys not in checkpoint: {missing[:3]}")
+    else:
+        log.info("SyncNet: all weights loaded")
     model.eval()
     return model.to(device)
 
@@ -224,15 +222,16 @@ def _extract_audio(video_path: str, sr: int = AUDIO_SR) -> np.ndarray | None:
 
 
 def _compute_mfcc(wav: np.ndarray, sr: int) -> np.ndarray:
-    """Compute MFCC at 100 fps. Returns [T_mfcc, N_MFCC] float32."""
+    """Compute MFCC at 100 fps. Returns [13, T_mfcc] float32 (coefficients × time)."""
     import python_speech_features
     mfcc = python_speech_features.mfcc(
         wav, sr, numcep=N_MFCC, winlen=0.025, winstep=0.010,
     )
-    return mfcc.astype(np.float32)   # [T_mfcc, 13]
+    return mfcc.T.astype(np.float32)   # [13, T_mfcc]
 
 
 def _crop_face(frame: np.ndarray, bbox: list, pad: float) -> np.ndarray:
+    """Returns RGB crop resized to FACE_SIZE×FACE_SIZE, uint8."""
     import cv2
     h, w  = frame.shape[:2]
     x1, y1, x2, y2 = bbox
@@ -243,34 +242,36 @@ def _crop_face(frame: np.ndarray, bbox: list, pad: float) -> np.ndarray:
     rx, ry = min(w, int(cx + half)), min(h, int(cy + half))
     crop   = frame[ly:ry, lx:rx]
     if crop.size == 0:
-        return np.zeros((FACE_SIZE, FACE_SIZE), dtype=np.uint8)
-    gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
-    return cv2.resize(gray, (FACE_SIZE, FACE_SIZE))
+        return np.zeros((FACE_SIZE, FACE_SIZE, 3), dtype=np.uint8)
+    return cv2.resize(crop, (FACE_SIZE, FACE_SIZE))  # RGB, uint8
 
 
 def _score_track(
-    face_crops: list[np.ndarray],   # [N] each (112,112) uint8 grayscale
-    mfcc: np.ndarray,               # [T_mfcc, 13]
+    face_crops: list[np.ndarray],   # [N] each (FACE_SIZE, FACE_SIZE, 3) uint8 RGB
+    mfcc: np.ndarray,               # [13, T_mfcc]  — transposed, 13 rows = coefficients
     frame_indices: list[int],
     fps: float,
     model: SyncNet,
     device: str,
+    vshift: int = 15,
+    batch_size: int = 20,
     debug_log=None,
 ) -> tuple[float, int]:
     """
-    Slide a 25-frame window over the track.
-    Returns (mean_confidence, best_offset).
+    Score a track using the official SyncNetInstance.evaluate approach:
+      - Extract lip embedding per frame-window using forward_lip
+      - Extract audio embedding per frame-window using forward_aud
+      - Compute pairwise distance with temporal shift ±vshift
+      - confidence = median(mean_dist) - min(mean_dist)
+    Returns (confidence, offset_frames).
     """
     N = len(face_crops)
-    if N < WINDOW_FRAMES:
+    if N < 5:
         if debug_log:
-            debug_log(f"    _score_track: only {N} frames < {WINDOW_FRAMES} minimum → skip")
+            debug_log(f"    _score_track: only {N} frames < 5 minimum → skip")
         return 0.0, 0
 
-    mfcc_per_frame = 100.0 / fps   # MFCC frames per video frame
-    confidences = []
-    best_offset = 0
-    n_windows = 0
+    mfcc_per_frame = 100.0 / fps  # MFCC frames per video frame (≈4 at 25fps)
 
     if debug_log:
         debug_log(
@@ -278,60 +279,79 @@ def _score_track(
             f"  mfcc_per_frame={mfcc_per_frame:.2f}  device={device}"
         )
 
-    # Slide with stride=5 frames
-    for start in range(0, N - WINDOW_FRAMES + 1, max(1, WINDOW_FRAMES // 5)):
-        end = start + WINDOW_FRAMES
-        n_windows += 1
-
-        # Visual: 5 evenly-spaced frames from the window
-        v_indices = np.linspace(start, end - 1, 5, dtype=int)
-        faces_5 = np.stack([face_crops[i] for i in v_indices])  # [5, H, W]
-        face_t  = torch.from_numpy(faces_5).float().div(255.0)
-        face_t  = face_t.unsqueeze(0).unsqueeze(0)  # [1, 1, 5, H, W]
-
-        # Audio: MFCC_PER_FRAME * WINDOW_FRAMES mfcc frames centred on the window
-        fi_start = frame_indices[start]
-        fi_end   = frame_indices[end - 1]
-        a_start  = max(0, int(fi_start * mfcc_per_frame))
-        a_end    = a_start + WINDOW_FRAMES * MFCC_PER_FRAME   # 25*4=100 mfcc frames
-        if a_end > len(mfcc):
-            a_end   = len(mfcc)
-            a_start = max(0, a_end - WINDOW_FRAMES * MFCC_PER_FRAME)
-
-        mfcc_slice = mfcc[a_start:a_end]    # [~100, 13]
-        target_cols = WINDOW_FRAMES * MFCC_PER_FRAME // 5   # 20
-        if len(mfcc_slice) < target_cols:
-            mfcc_slice = np.pad(mfcc_slice, ((0, target_cols - len(mfcc_slice)), (0, 0)))
-        mfcc_slice = mfcc_slice[:target_cols].T    # [13, 20]
-        aud_t = torch.from_numpy(mfcc_slice).float().unsqueeze(0).unsqueeze(0)  # [1,1,13,20]
-
-        with torch.inference_mode():
-            face_t = face_t.to(device)
-            aud_t  = aud_t.to(device)
-            conf   = model(face_t, aud_t).item()
-
-        confidences.append(conf)
-
-        if debug_log and n_windows <= 3:
-            debug_log(
-                f"    window[{n_windows}]: frames[{start}:{end}]"
-                f"  a_mfcc=[{a_start}:{a_end}]"
-                f"  face_t={tuple(face_t.shape)}  aud_t={tuple(aud_t.shape)}"
-                f"  conf={conf:.4f}"
-            )
-
-    if not confidences:
-        if debug_log:
-            debug_log(f"    _score_track: 0 windows scored")
+    # Build face tensor: [N_total, 3, 5, H, W] — one entry per sliding position
+    # Official code: imtv shape is [1, T, H, W, C] → transposed to [1, C, T, H, W]
+    # then batch is [B, 3, 5, H, W]
+    lastframe = N - 4   # need 5 consecutive frames per window
+    if lastframe <= 0:
         return 0.0, 0
 
-    mean_conf = float(np.mean(confidences))
+    # Stack all frames as a float tensor [N, H, W, 3] → [1, N, H, W, 3]
+    frames_np = np.stack(face_crops, axis=0).astype(np.float32)  # [N, H, W, 3]
+    # Transpose to [1, 3, N, H, W] matching official imtv layout
+    imtv = torch.from_numpy(frames_np).permute(3, 0, 1, 2).unsqueeze(0)  # [1, 3, N, H, W]
+
+    # MFCC tensor: official cct shape is [1, 1, 13, T_mfcc]
+    cct = torch.from_numpy(mfcc.astype(np.float32)).unsqueeze(0).unsqueeze(0)  # [1, 1, 13, T]
+
+    im_feat_list = []
+    cc_feat_list = []
+
+    with torch.inference_mode():
+        for i in range(0, lastframe, batch_size):
+            # Video batch: [B, 3, 5, H, W]
+            im_batch = [imtv[:, :, vf:vf+5, :, :] for vf in range(i, min(lastframe, i+batch_size))]
+            im_in    = torch.cat(im_batch, 0).to(device)
+            im_out   = model.forward_lip(im_in)
+            im_feat_list.append(im_out.cpu())
+
+            # Audio batch: [B, 1, 13, 20]  — frame vf maps to mfcc col vf*mfcc_per_frame
+            cc_batch = []
+            for vf in range(i, min(lastframe, i+batch_size)):
+                fi      = frame_indices[vf]
+                a_start = int(fi * mfcc_per_frame)
+                a_end   = a_start + 20
+                if a_end > cct.shape[3]:
+                    a_end   = cct.shape[3]
+                    a_start = max(0, a_end - 20)
+                cc_slice = cct[:, :, :, a_start:a_end]
+                if cc_slice.shape[3] < 20:
+                    cc_slice = F.pad(cc_slice, (0, 20 - cc_slice.shape[3]))
+                cc_batch.append(cc_slice)
+            cc_in  = torch.cat(cc_batch, 0).to(device)
+            cc_out = model.forward_aud(cc_in)
+            cc_feat_list.append(cc_out.cpu())
+
+    im_feat = torch.cat(im_feat_list, 0)  # [lastframe, 1024]
+    cc_feat = torch.cat(cc_feat_list, 0)  # [lastframe, 1024]
+
+    if debug_log:
+        debug_log(f"    im_feat={tuple(im_feat.shape)}  cc_feat={tuple(cc_feat.shape)}")
+
+    # Pairwise distance with temporal shift  (official calc_pdist)
+    win_size = vshift * 2 + 1
+    feat2p   = F.pad(cc_feat, (0, 0, vshift, vshift))
+    dists = []
+    for i in range(len(im_feat)):
+        dists.append(
+            F.pairwise_distance(
+                im_feat[[i], :].repeat(win_size, 1),
+                feat2p[i:i+win_size, :],
+            )
+        )
+
+    mdist  = torch.mean(torch.stack(dists, 1), 1)   # [win_size]
+    minval, minidx = torch.min(mdist, 0)
+    conf   = float(torch.median(mdist) - minval)
+    offset = int(vshift - minidx.item())
+
     if debug_log:
         debug_log(
-            f"    _score_track done: {n_windows} windows  "
-            f"conf min={min(confidences):.3f} max={max(confidences):.3f} mean={mean_conf:.3f}"
+            f"    mdist min={minval.item():.3f}  median={torch.median(mdist).item():.3f}"
+            f"  conf={conf:.3f}  offset={offset}"
         )
-    return mean_conf, best_offset
+
+    return conf, offset
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -390,12 +410,12 @@ class SyncNetWorker:
             wav  = _extract_audio(video_path)
             if wav is None:
                 self._log.warning(f"  {stem}: audio extraction failed — using silence")
-                mfcc = np.zeros((1, N_MFCC), dtype=np.float32)
+                mfcc = np.zeros((N_MFCC, 1), dtype=np.float32)
             else:
                 mfcc = _compute_mfcc(wav, AUDIO_SR)
                 self._log.info(
                     f"  {stem}: audio wav={wav.shape}  mfcc={mfcc.shape}"
-                    f"  mfcc_dur={len(mfcc)/100:.1f}s  video_dur={len(needed)/fps:.1f}s"
+                    f"  mfcc_dur={mfcc.shape[1]/100:.1f}s  video_dur={len(needed)/fps:.1f}s"
                 )
 
             sync_tracks = {}
@@ -409,7 +429,7 @@ class SyncNetWorker:
                     if fi in frame_cache:
                         face_crops.append(_crop_face(frame_cache[fi], bbox, CROP_PAD))
                     else:
-                        face_crops.append(np.zeros((FACE_SIZE, FACE_SIZE), dtype=np.uint8))
+                        face_crops.append(np.zeros((FACE_SIZE, FACE_SIZE, 3), dtype=np.uint8))
                         n_missing += 1
 
                 self._log.info(
