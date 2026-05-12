@@ -14,6 +14,22 @@ Usage:
   python prefetch_models_talking_characters.py
   python prefetch_models_talking_characters.py --skip_loconet   # use Light-ASD only
 """
+"""
+prefetch_models_talking_characters.py
+--------------------------------------
+Pre-download all model weights needed by the talking-characters pipeline.
+Must be run on the LOGIN NODE — compute nodes have no internet access
+(HF_HUB_OFFLINE=1 is set at job start).
+
+Downloads:
+  - InsightFace buffalo_sc (SCRFD-10GF) — face detection
+  - LoCoNet weights                     — active speaker detection
+  - Light-ASD weights                   — ASD fallback
+
+Usage:
+  python prefetch_models_talking_characters.py
+  python prefetch_models_talking_characters.py --skip_loconet   # use Light-ASD only
+"""
 
 import argparse
 import os
@@ -22,11 +38,12 @@ from pathlib import Path
 
 CACHE_DIR = Path.home() / ".cache" / "talking_characters"
 
-# LoCoNet pretrained weights (AVA-ActiveSpeaker)
-LOCONET_URL = "https://github.com/kahnchana/loconet/releases/download/v1.0/loconet_ava.pth"
+# LoCoNet pretrained weights (AVA-ActiveSpeaker) — official Google Drive release
+# Source: https://huggingface.co/Superxixixi/LoCoNet_ASD (mirrors SJTUwxz/LoCoNet_ASD README)
+LOCONET_GDRIVE_ID = "1EX-V464jCD6S-wg68yGuAa-UcsMrw8mK"
 
 # Light-ASD pretrained weights
-LIGHT_ASD_URL = "https://github.com/Junhua-Liao/Light-ASD/releases/download/v1.0/light_asd.pth"
+LIGHT_ASD_URL = "https://github.com/Junhua-Liao/Light-ASD/raw/main/weight/pretrain_AVA_CVPR.model"
 
 
 def prefetch_insightface():
@@ -37,37 +54,50 @@ def prefetch_insightface():
     app = FaceAnalysis(
         name="buffalo_sc",
         allowed_modules=["detection"],
-        providers=["CPUExecutionProvider"],  # CPU is fine for download
+        providers=["CPUExecutionProvider"],
     )
     app.prepare(ctx_id=-1, det_size=(640, 640))
     print("  InsightFace buffalo_sc OK")
 
 
 def prefetch_loconet():
-    """Download LoCoNet weights."""
-    import urllib.request
+    """Download LoCoNet weights from Google Drive via gdown."""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     dest = CACHE_DIR / "loconet.pth"
     if dest.exists():
         print(f"  LoCoNet already cached at {dest}")
         return
     print(f"  Downloading LoCoNet → {dest} ...")
-    urllib.request.urlretrieve(LOCONET_URL, dest)
+    try:
+        import gdown
+    except ImportError:
+        raise ImportError(
+            "gdown is required for Google Drive downloads. "
+            "Run: pip install gdown"
+        )
+    url = f"https://drive.google.com/uc?id={LOCONET_GDRIVE_ID}"
+    gdown.download(url, str(dest), quiet=False)
+    if not dest.exists() or dest.stat().st_size < 1e6:
+        raise RuntimeError(
+            f"LoCoNet download may have failed (file missing or too small): {dest}\n"
+            "Try manually: gdown 'https://drive.google.com/uc?id=1EX-V464jCD6S-wg68yGuAa-UcsMrw8mK' -O ~/.cache/talking_characters/loconet.pth"
+        )
     print(f"  LoCoNet OK  ({dest.stat().st_size / 1e6:.1f} MB)")
 
 
 def prefetch_light_asd():
-    """Download Light-ASD weights."""
+    """Download Light-ASD weights from repo's weight/ folder."""
     import urllib.request
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    dest = CACHE_DIR / "light_asd.pth"
+    dest = CACHE_DIR / "light_asd.model"   # .model extension, not .pth
     if dest.exists():
         print(f"  Light-ASD already cached at {dest}")
         return
     print(f"  Downloading Light-ASD → {dest} ...")
     urllib.request.urlretrieve(LIGHT_ASD_URL, dest)
+    if dest.stat().st_size < 1e5:
+        raise RuntimeError(f"Light-ASD download looks too small: {dest}")
     print(f"  Light-ASD OK  ({dest.stat().st_size / 1e6:.1f} MB)")
-
 
 def main():
     ap = argparse.ArgumentParser()

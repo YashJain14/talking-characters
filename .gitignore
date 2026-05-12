@@ -16,3 +16,5 @@ scratch/
 
 # PBS job output logs (large, generated per-run)
 talking_characters_output.log
+
+talking_character/
