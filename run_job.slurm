@@ -62,11 +62,10 @@ MAX_CLIP_S=60.0
 # (was 128 — that dropped 56k panel shot detections)
 MIN_FACE_PX=64
 
-FROM_STAGE=segment_export   # resume: ingest | detect_track | syncnet_score | segment_export
+FROM_STAGE=ingest   # resume: ingest | detect_track | syncnet_score | segment_export
 
-# Only clear clips — tracks and sync are reused
-rm -rf "$SCRATCH_TC/clips"
-echo "Cleared clips/ — running from $FROM_STAGE"
+# Keeping existing clips — only new videos will be processed
+echo "Keeping existing clips — running from $FROM_STAGE"
 
 # ── GPU concurrency summary (1x V100-32GB) ───────────────────────────────────
 # ingest:         CPU-only → 4 yt-dlp threads
@@ -91,7 +90,6 @@ echo "Job completed at $(date)"
 # ── Copy clips into repo for inspection ───────────────────────────────────────
 CLIPS_DEST="$HOME/talking-characters/output_clips"
 mkdir -p "$CLIPS_DEST"
-rm -f "$CLIPS_DEST"/*.mp4
 cp -r "$SCRATCH_TC/clips/"*/*.mp4 "$CLIPS_DEST/" 2>/dev/null || true
 cp "$SCRATCH_TC/clips/segments.json" "$CLIPS_DEST/" 2>/dev/null || true
 echo "Clips copied to $CLIPS_DEST  ($(ls "$CLIPS_DEST"/*.mp4 2>/dev/null | wc -l) mp4s)"
