@@ -132,7 +132,7 @@ Weights: `~/.cache/talking_characters/syncnet.pth`
 | Video | Label | Clips Extracted | Notes |
 |-------|-------|-----------------|-------|
 | [youtube.com/watch?v=57lDpTwiW6g](https://www.youtube.com/watch?v=57lDpTwiW6g) | YC | 101 | Human characters, multi-speaker |
-| [youtube.com/watch?v=UPGB-hsAoVY](https://www.youtube.com/watch?v=UPGB-hsAoVY) | — | 38 | Human characters |
+| [youtube.com/watch?v=UPGB-hsAoVY](https://www.youtube.com/watch?v=UPGB-hsAoVY) | YC | 38 | Human characters, multi-speaker |
 | [youtube.com/watch?v=8kkosuO2AII](https://www.youtube.com/watch?v=8kkosuO2AII) | Naruto | 6 | Animated — pipeline struggles |
 
 ---
