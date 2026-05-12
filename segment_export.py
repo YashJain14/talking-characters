@@ -104,6 +104,7 @@ def _find_segments(
     max_frames        = int(MAX_CLIP_S   * fps)
 
     segments = []
+    _log = logging.getLogger("segment_export")
 
     for track_id, asd in asd_tracks.items():
         frames = np.array(asd["frames"], dtype=np.int32)
@@ -111,9 +112,16 @@ def _find_segments(
         if len(frames) == 0:
             continue
 
+        _log.info(f"  track {track_id}: {len(frames)} frames, "
+                  f"score min={scores.min():.3f} mean={scores.mean():.3f} "
+                  f"max={scores.max():.3f}, "
+                  f"above_threshold={int((scores > SPEAK_THRESHOLD).sum())}")
+
         # Build a dense per-frame score array (0 where track is absent)
         dense_scores = np.zeros(n_frames, dtype=np.float32)
-        dense_scores[frames] = scores
+        # Clamp frame indices to valid range before assignment
+        valid = frames[frames < n_frames]
+        dense_scores[valid] = scores[frames < n_frames]
         is_active = dense_scores > SPEAK_THRESHOLD
 
         # Build a per-frame "face present" mask from track detections
@@ -138,6 +146,7 @@ def _find_segments(
             run_ends.append(n_frames)
 
         if not run_starts:
+            _log.info(f"  track {track_id}: no frames above threshold — no segments")
             continue
 
         # Merge runs separated by short gaps
@@ -153,17 +162,24 @@ def _find_segments(
 
         for s, e in zip(merged_starts, merged_ends):
             length = e - s
+            dur_s  = length / fps
             if length < min_frames or length > max_frames:
+                _log.info(f"    segment [{s},{e}] dropped: duration {dur_s:.1f}s "
+                          f"(need {MIN_CLIP_S}–{MAX_CLIP_S}s)")
                 continue
 
             clip_active = is_active[s:e]
             active_ratio = float(clip_active.mean())
             if active_ratio < MIN_ACTIVE_RATIO:
+                _log.info(f"    segment [{s},{e}] dropped: active_ratio {active_ratio:.3f} "
+                          f"< {MIN_ACTIVE_RATIO}")
                 continue
 
             clip_present = face_present[s:e]
             absent_ratio = 1.0 - float(clip_present.mean())
             if absent_ratio > MAX_ABSENT_RATIO:
+                _log.info(f"    segment [{s},{e}] dropped: absent_ratio {absent_ratio:.3f} "
+                          f"> {MAX_ABSENT_RATIO}")
                 continue
 
             segments.append({
