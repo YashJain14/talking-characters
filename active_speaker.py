@@ -155,10 +155,10 @@ def _load_loconet(device: str):
     model = model.to(device)
 
     # Sanity: varied random inputs should produce varied logits
-    # face: [N, 1, 112, 112] grayscale normalised; audio: [1, 4*N, 40] mel
+    # face: [N, 3, 112, 112] RGB normalised; audio: [1, 4*N, 40] mel
     with torch.inference_mode():
         N = 8
-        _f = torch.randn(N, 1, 112, 112, device=device)
+        _f = torch.randn(N, 3, 112, 112, device=device)
         _a = torch.randn(1, N * 4, 40, device=device)
         _out = model(_f, _a)
         _probs = torch.sigmoid(_out)
@@ -252,22 +252,23 @@ class ASDWorker:
                 bboxes        = [d["bbox"]  for d in detections]
                 N = len(frame_indices)
 
-                # Face crops: grayscale + normalise to (px/255 - 0.4161)/0.1688
-                import cv2
+                # Face crops: RGB uint8 → float normalised (px/255 - 0.4161)/0.1688
                 face_crops = []
                 for fi, bbox in zip(frame_indices, bboxes):
                     if fi in frame_cache:
                         crop = _crop_face(frame_cache[fi], bbox, CROP_PAD_ASD)
                     else:
                         crop = np.zeros((FACE_SIZE, FACE_SIZE, 3), dtype=np.uint8)
-                    gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY).astype(np.float32)
-                    gray = (gray / 255.0 - 0.4161) / 0.1688
-                    face_crops.append(gray)
+                    face_crops.append(crop)
 
-                # [N, 1, H, W]
+                # [N, 3, H, W] normalised
                 face_tensor = (
-                    torch.from_numpy(np.stack(face_crops))   # [N, H, W]
-                    .unsqueeze(1)                             # [N, 1, H, W]
+                    torch.from_numpy(np.stack(face_crops))   # [N, H, W, 3]
+                    .permute(0, 3, 1, 2)                     # [N, 3, H, W]
+                    .float()
+                    .div(255.0)
+                    .sub(0.4161)
+                    .div(0.1688)
                     .to(self.device)
                 )
 

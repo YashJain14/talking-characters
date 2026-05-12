@@ -106,14 +106,18 @@ class _VisualFrontend(nn.Module):
         self.resnet = _ResNet18ASD()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: [N, 1, H, W]  grayscale, already normalised  (no batch dim)
-        N = x.shape[0]
-        H, W = x.shape[2], x.shape[3]
-        # Process each frame independently: treat N as batch, T=1
-        x = x.reshape(N, 1, 1, H, W)        # [N, 1, 1, H, W]
-        x = self.frontend3D(x)               # [N, 64, 1, h, w]
-        x = x.squeeze(2)                     # [N, 64, h, w]
-        x = self.resnet(x)                   # [N, 512]
+        # x: [N, C, H, W]  C=1 (grayscale) or C=3 (RGB), normalised
+        N, C, H, W = x.shape
+        if C == 3:
+            gray = (0.2989*x[:,0] + 0.5870*x[:,1] + 0.1140*x[:,2])  # [N,H,W]
+        else:
+            gray = x[:,0]                    # [N, H, W]
+        # Normalise: (px/255 - 0.4161)/0.1688 — applied if input is in [0,1]
+        # (caller may have already normalised; we just reshape here)
+        gray = gray.unsqueeze(1).unsqueeze(1)  # [N, 1, 1, H, W]
+        x = self.frontend3D(gray)              # [N, 64, 1, h, w]
+        x = x.squeeze(2)                       # [N, 64, h, w]
+        x = self.resnet(x)                     # [N, 512]
         return x
 
 
