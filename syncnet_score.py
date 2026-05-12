@@ -427,7 +427,8 @@ class SyncNetWorker:
             self._log.info(f"  {stem}: decoded {len(frame_cache)}/{len(needed)} needed frames")
 
             wav  = _extract_audio(video_path)
-            if wav is None:
+            audio_failed = wav is None
+            if audio_failed:
                 self._log.warning(f"  {stem}: audio extraction failed — using silence")
                 mfcc = np.zeros((N_MFCC, 1), dtype=np.float32)
             else:
@@ -457,22 +458,42 @@ class SyncNetWorker:
                     f"  face_size={face_crops[0].shape if face_crops else 'n/a'}"
                 )
 
-                conf, offset = _score_track(
-                    face_crops, mfcc, frame_indices, fps,
-                    self._model, self.device,
-                    debug_log=self._log.info,
-                )
+                # Compute median face size for this track
+                bboxes = [d["bbox"] for d in detections]
+                face_sizes = [min(b[2]-b[0], b[3]-b[1]) for b in bboxes]
+                median_face_px = round(float(np.median(face_sizes)), 1)
+
+                n_windows = max(0, len(face_crops) - 4)
+
+                if audio_failed:
+                    conf, offset = 0.0, 0
+                    reject_reason = "audio_failed"
+                elif len(face_crops) < 5:
+                    conf, offset = 0.0, 0
+                    reject_reason = "too_few_frames"
+                else:
+                    conf, offset = _score_track(
+                        face_crops, mfcc, frame_indices, fps,
+                        self._model, self.device,
+                        debug_log=self._log.info,
+                    )
+                    reject_reason = None if conf >= SYNC_THRESHOLD else "low_confidence"
 
                 passes = conf >= SYNC_THRESHOLD
                 sync_tracks[track_id] = {
-                    "frames":     frame_indices,
-                    "confidence": round(conf, 4),
-                    "offset":     offset,
-                    "passes":     passes,
+                    "frames":          frame_indices,
+                    "confidence":      round(conf, 4),
+                    "offset":          offset,
+                    "passes":          passes,
+                    "reject_reason":   reject_reason,
+                    "n_windows":       n_windows,
+                    "median_face_px":  median_face_px,
                 }
                 self._log.info(
                     f"  {stem} track={track_id}: conf={conf:.3f}"
                     f"  threshold={SYNC_THRESHOLD}  passes={passes}"
+                    f"  reject={reject_reason}  face_px={median_face_px:.0f}"
+                    f"  n_windows={n_windows}"
                 )
 
             n_pass = sum(1 for t in sync_tracks.values() if t["passes"])

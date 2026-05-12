@@ -57,21 +57,21 @@ def _find_clips(
     sync_tracks: dict,
     trk_tracks:  dict,
     fps: float,
-) -> list[dict]:
+) -> tuple[list[dict], list[dict]]:
     """
     For each passing track, split on long gaps to produce sub-clips.
-    Returns list of {track_id, start_frame, end_frame, face_present_ratio}.
+    Returns (accepted_clips, rejected_clips), each a list of dicts with reject_reason on rejected.
     """
     gap_frames  = int(GAP_BRIDGE_S * fps)
     min_frames  = int(MIN_CLIP_S   * fps)
     max_frames  = int(MAX_CLIP_S   * fps)
-    clips = []
+    clips    = []
+    rejected = []
 
     for track_id, sync in sync_tracks.items():
         if not sync.get("passes", False):
             continue
 
-        # All frame indices where the face was detected
         det_set = {d["frame"] for d in trk_tracks.get(track_id, [])}
         frames  = sorted(det_set)
         if not frames:
@@ -90,24 +90,37 @@ def _find_clips(
 
         for s, e in runs:
             length = e - s + 1
-            if length < min_frames or length > max_frames:
+            dur_s  = round(length / fps, 2)
+
+            if length < min_frames:
+                rejected.append({"track_id": track_id, "start_frame": s, "end_frame": e,
+                                  "duration_s": dur_s, "reject_reason": "too_short",
+                                  "sync_confidence": sync["confidence"]})
+                continue
+            if length > max_frames:
+                rejected.append({"track_id": track_id, "start_frame": s, "end_frame": e,
+                                  "duration_s": dur_s, "reject_reason": "too_long",
+                                  "sync_confidence": sync["confidence"]})
                 continue
 
-            # Face present ratio: frames with detections / total frames in span
             det_in_span = sum(1 for f in frames if s <= f <= e)
             face_ratio  = det_in_span / length
             if face_ratio < MIN_FACE_RATIO:
+                rejected.append({"track_id": track_id, "start_frame": s, "end_frame": e,
+                                  "duration_s": dur_s, "reject_reason": "low_face_ratio",
+                                  "face_present_ratio": round(face_ratio, 4),
+                                  "sync_confidence": sync["confidence"]})
                 continue
 
             clips.append({
-                "track_id":          track_id,
-                "start_frame":       s,
-                "end_frame":         e,
+                "track_id":           track_id,
+                "start_frame":        s,
+                "end_frame":          e,
                 "face_present_ratio": round(face_ratio, 4),
-                "sync_confidence":   sync["confidence"],
+                "sync_confidence":    sync["confidence"],
             })
 
-    return clips
+    return clips, rejected
 
 
 def _detect_black_bars(frame: np.ndarray) -> tuple[int, int, int, int]:
@@ -263,11 +276,17 @@ class SegmentWorker:
                 pass
             log.info(f"  {stem}: frame_size={frame_w}x{frame_h}")
 
-            clips = _find_clips(sync_tracks, trk_tracks, fps)
+            clips, rejected_clips = _find_clips(sync_tracks, trk_tracks, fps)
             log.info(
-                f"  {stem}: _find_clips → {len(clips)} candidate clips"
+                f"  {stem}: _find_clips → {len(clips)} accepted  {len(rejected_clips)} rejected"
                 f"  (gap_bridge={GAP_BRIDGE_S}s  min={MIN_CLIP_S}s  max={MAX_CLIP_S}s)"
             )
+            for rc in rejected_clips:
+                log.info(
+                    f"    REJECTED: track={rc['track_id']}"
+                    f"  dur={rc['duration_s']:.1f}s"
+                    f"  reason={rc['reject_reason']}"
+                )
             for i, c in enumerate(clips):
                 dur = (c["end_frame"] - c["start_frame"]) / fps
                 log.info(
@@ -281,8 +300,9 @@ class SegmentWorker:
             if not clips:
                 log.info(f"  {stem}: no clips passed all gates")
                 done_marker.parent.mkdir(parents=True, exist_ok=True)
-                done_marker.write_text("[]")
-                return {"path": video_path, "status": "ok", "n_clips": 0, "clips": []}
+                done_marker.write_text(json.dumps({"clips": [], "rejected_clips": rejected_clips}))
+                return {"path": video_path, "status": "ok", "n_clips": 0, "clips": [],
+                        "rejected_clips": rejected_clips}
 
             stem_base = Path(video_path).stem
             clip_dir  = Path(out_dir) / stem_base
@@ -303,6 +323,21 @@ class SegmentWorker:
                     continue
 
                 log.info(f"    exporting {name}  ({(ef-sf)/fps:.1f}s)")
+                # Count how many other tracks overlap this clip's frame range
+                n_faces_in_frame = sum(
+                    1 for oid, odets in trk_tracks.items()
+                    if oid != tid and any(sf <= d["frame"] <= ef for d in odets)
+                )
+
+                # Median face size for this track within clip range
+                clip_dets = [d for d in trk_tracks.get(tid, []) if sf <= d["frame"] <= ef]
+                if clip_dets:
+                    face_sizes = [min(d["bbox"][2]-d["bbox"][0], d["bbox"][3]-d["bbox"][1])
+                                  for d in clip_dets]
+                    median_face_px = round(float(np.median(face_sizes)), 1)
+                else:
+                    median_face_px = 0.0
+
                 ok, had_bars, had_other = _export_clip(
                     video_path, trk_tracks, tid, sf, ef, fps,
                     frame_w, frame_h, cpath,
@@ -312,20 +347,22 @@ class SegmentWorker:
                     continue
 
                 meta = {
-                    "source_video":       video_path,
-                    "track_id":           tid,
-                    "start_frame":        sf,
-                    "end_frame":          ef,
-                    "start_s":            round(sf / fps, 3),
-                    "end_s":              round(ef / fps, 3),
-                    "duration_s":         round((ef - sf) / fps, 3),
-                    "fps":                round(fps, 3),
-                    "sync_confidence":    clip["sync_confidence"],
-                    "face_present_ratio": clip["face_present_ratio"],
-                    "had_black_bars":     had_bars,
-                    "had_extra_speaker":  had_other,
-                    "resolution":         EXPORT_RES,
-                    "clip_path":          cpath,
+                    "source_video":        video_path,
+                    "track_id":            tid,
+                    "start_frame":         sf,
+                    "end_frame":           ef,
+                    "start_s":             round(sf / fps, 3),
+                    "end_s":               round(ef / fps, 3),
+                    "duration_s":          round((ef - sf) / fps, 3),
+                    "fps":                 round(fps, 3),
+                    "sync_confidence":     clip["sync_confidence"],
+                    "face_present_ratio":  clip["face_present_ratio"],
+                    "had_black_bars":      had_bars,
+                    "had_extra_speaker":   had_other,
+                    "n_faces_in_frame":    n_faces_in_frame,
+                    "median_face_px":      median_face_px,
+                    "resolution":          EXPORT_RES,
+                    "clip_path":           cpath,
                 }
                 mpath.write_text(json.dumps(meta, indent=2))
                 written.append(meta)
@@ -335,9 +372,10 @@ class SegmentWorker:
 
             elapsed = time.perf_counter() - t0
             log.info(f"DONE {stem}: {len(written)} clips written  {elapsed:.1f}s")
-            done_marker.write_text(json.dumps(written))
+            done_marker.write_text(json.dumps({"clips": written, "rejected_clips": rejected_clips}))
             return {"path": video_path, "status": "ok",
-                    "n_clips": len(written), "clips": written}
+                    "n_clips": len(written), "clips": written,
+                    "rejected_clips": rejected_clips}
 
         except Exception as e:
             import traceback
@@ -397,8 +435,9 @@ def main():
         for i, (vp, sp, tp) in enumerate(runnable)
     ]
 
-    all_clips = []
-    ok = failed = 0
+    all_clips    = []
+    all_rejected = []
+    ok = failed  = 0
     total   = len(runnable)
     pending = list(futures)
     t0      = time.perf_counter()
@@ -409,26 +448,31 @@ def main():
             if res["status"] == "ok":
                 ok += 1
                 all_clips.extend(res.get("clips", []))
+                all_rejected.extend(res.get("rejected_clips", []))
             else:
                 failed += 1
                 log.error(f"FAILED {Path(res['path']).name}: {res['status']}")
         completed = ok + failed
         elapsed   = time.perf_counter() - t0
         log.info(f"[{completed}/{total}]  ok={ok}  failed={failed}  "
-                 f"clips={len(all_clips)}  elapsed={elapsed:.1f}s")
+                 f"clips={len(all_clips)}  rejected={len(all_rejected)}  elapsed={elapsed:.1f}s")
         wandb.log({"segment/ok": ok, "segment/failed": failed,
                    "segment/total_clips": len(all_clips),
                    "segment/elapsed_s": elapsed})
 
     out = Path(args.out_dir) / "segments.json"
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(all_clips, indent=2))
+    out.write_text(json.dumps({"clips": all_clips, "rejected_clips": all_rejected}, indent=2))
 
     durations = [c["duration_s"] for c in all_clips]
-    log.info(f"Total clips: {len(all_clips)}")
+    log.info(f"Total clips: {len(all_clips)}  rejected: {len(all_rejected)}")
     if durations:
         log.info(f"Duration mean={np.mean(durations):.1f}s  "
                  f"total={sum(durations)/3600:.2f}h")
+    if all_rejected:
+        from collections import Counter
+        reasons = Counter(r["reject_reason"] for r in all_rejected)
+        log.info(f"Rejection reasons: {dict(reasons)}")
     log.info(f"Manifest → {out}")
     wandb.finish()
     ray.shutdown()

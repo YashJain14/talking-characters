@@ -58,11 +58,13 @@ GAP_BRIDGE_S=0.5   # bridge speaking gaps shorter than this
 MIN_CLIP_S=3.0
 MAX_CLIP_S=60.0
 
-FROM_STAGE=syncnet_score   # resume: ingest | detect_track | syncnet_score | segment_export
+FROM_STAGE=detect_track   # resume: ingest | detect_track | syncnet_score | segment_export
 
-# Recompute sync with new threshold (passes flag is baked into the JSON)
-rm -f "$SCRATCH_TC"/sync/*.sync.json
-rm -rf "$SCRATCH_TC"/clips
+# Full clean — remove all stage outputs so everything reruns fresh
+rm -rf "$SCRATCH_TC/tracks"
+rm -rf "$SCRATCH_TC/sync"
+rm -rf "$SCRATCH_TC/clips"
+echo "Cleared tracks/ sync/ clips/ — running from $FROM_STAGE"
 
 # ── GPU concurrency summary (1x V100-32GB) ───────────────────────────────────
 # ingest:         CPU-only → 4 yt-dlp threads

@@ -243,22 +243,60 @@ class DetectTrackWorker:
 
             # Drop tracks with fewer than fps/2 detections (~0.5s)
             min_len = max(1, int(fps / 2))
-            before = len(tracks)
-            tracks  = {k: v for k, v in tracks.items() if len(v) >= min_len}
+            before  = len(tracks)
+            rejected_tracks = {}
+            kept_tracks     = {}
+            for k, v in tracks.items():
+                if len(v) < min_len:
+                    rejected_tracks[k] = {"n_dets": len(v), "reject_reason": "too_short",
+                                          "min_len_required": min_len}
+                else:
+                    kept_tracks[k] = v
+            tracks = kept_tracks
             self._log.info(
                 f"  {stem}: track filter min_frames={min_len}  "
-                f"kept={len(tracks)}/{before}"
+                f"kept={len(tracks)}/{before}  rejected_short={len(rejected_tracks)}"
             )
+
+            # Compute per-track stats: median face size and concurrent speaker count
+            # Build frame→track_ids mapping to count overlapping tracks
+            frame_to_tracks: dict[int, list[str]] = {}
+            for tid, dets in tracks.items():
+                for d in dets:
+                    frame_to_tracks.setdefault(d["frame"], []).append(tid)
+
+            track_stats = {}
+            for tid, dets in tracks.items():
+                bboxes  = [d["bbox"] for d in dets]
+                widths  = [b[2] - b[0] for b in bboxes]
+                heights = [b[3] - b[1] for b in bboxes]
+                frames  = [d["frame"] for d in dets]
+                # Count how many other tracks share frames with this track
+                concurrent_counts = [len(frame_to_tracks.get(f, [])) for f in frames]
+                track_stats[tid] = {
+                    "median_face_w":      round(float(np.median(widths)),  1),
+                    "median_face_h":      round(float(np.median(heights)), 1),
+                    "median_n_faces_in_frame": round(float(np.median(concurrent_counts)), 1),
+                    "max_n_faces_in_frame":    int(max(concurrent_counts)),
+                }
+                self._log.info(
+                    f"  {stem} track={tid}: n={len(dets)}"
+                    f"  face={track_stats[tid]['median_face_w']:.0f}x{track_stats[tid]['median_face_h']:.0f}px"
+                    f"  concurrent_faces_median={track_stats[tid]['median_n_faces_in_frame']:.1f}"
+                )
 
             elapsed = time.perf_counter() - t0
             result_data = {
-                "path":     video_path,
-                "fps":      round(fps, 3),
-                "n_frames": n_frames,
-                "n_tracks": len(tracks),
-                "tracks":   tracks,
-                "status":   "ok",
-                "time_s":   round(elapsed, 3),
+                "path":             video_path,
+                "fps":              round(fps, 3),
+                "n_frames":         n_frames,
+                "n_tracks":         len(tracks),
+                "n_tiny_dropped":   n_tiny_dropped,
+                "tracks":           tracks,
+                "track_stats":      track_stats,
+                "rejected_tracks":  rejected_tracks,
+                "status":           "ok",
+                "time_s":           round(elapsed, 3),
             }
             Path(out_dir).mkdir(parents=True, exist_ok=True)
             out_path.write_text(json.dumps(result_data))
