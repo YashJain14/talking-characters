@@ -426,6 +426,7 @@ class SegmentWorker:
 
 
 def main():
+    global SPEAK_THRESHOLD, GAP_BRIDGE_S, MIN_CLIP_S, MAX_CLIP_S
     ap = argparse.ArgumentParser()
     ap.add_argument("--video_dir",    required=True)
     ap.add_argument("--asd_dir",      required=True)
@@ -441,7 +442,6 @@ def main():
     args = ap.parse_args()
 
     # Override module-level constants if user changed thresholds
-    global SPEAK_THRESHOLD, GAP_BRIDGE_S, MIN_CLIP_S, MAX_CLIP_S
     SPEAK_THRESHOLD = args.speak_threshold
     GAP_BRIDGE_S    = args.gap_bridge_s
     MIN_CLIP_S      = args.min_clip_s
