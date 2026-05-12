@@ -60,11 +60,6 @@ MAX_CLIP_S=60.0
 
 FROM_STAGE=ingest   # resume: ingest | detect_track | syncnet_score | segment_export
 
-# Clear stale caches: video had no audio stream, must re-download and re-score
-rm -f "$SCRATCH_TC"/raw_videos/unlabelled/.*.done   # force re-download
-rm -f "$SCRATCH_TC"/raw_videos/unlabelled/*.mp4     # delete video-only file
-rm -f "$SCRATCH_TC"/sync/*.sync.json                # delete silence-scored sync results
-
 # ── GPU concurrency summary (1x V100-32GB) ───────────────────────────────────
 # ingest:         CPU-only → 4 yt-dlp threads
 # detect_track:   0.25 GPU/actor → up to 4 concurrent actors  (SCRFD-10GF)
