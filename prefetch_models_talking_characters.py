@@ -2,52 +2,28 @@
 prefetch_models_talking_characters.py
 --------------------------------------
 Pre-download all model weights needed by the talking-characters pipeline.
-Must be run on the LOGIN NODE — compute nodes have no internet access
-(HF_HUB_OFFLINE=1 is set at job start).
+Must be run on the LOGIN NODE — compute nodes have no internet access.
 
 Downloads:
   - InsightFace buffalo_sc (SCRFD-10GF) — face detection
-  - LoCoNet weights                     — active speaker detection
-  - Light-ASD weights                   — ASD fallback
+  - SyncNet weights                     — audio-visual sync scoring
 
 Usage:
   python prefetch_models_talking_characters.py
-  python prefetch_models_talking_characters.py --skip_loconet   # use Light-ASD only
-"""
-"""
-prefetch_models_talking_characters.py
---------------------------------------
-Pre-download all model weights needed by the talking-characters pipeline.
-Must be run on the LOGIN NODE — compute nodes have no internet access
-(HF_HUB_OFFLINE=1 is set at job start).
-
-Downloads:
-  - InsightFace buffalo_sc (SCRFD-10GF) — face detection
-  - LoCoNet weights                     — active speaker detection
-  - Light-ASD weights                   — ASD fallback
-
-Usage:
-  python prefetch_models_talking_characters.py
-  python prefetch_models_talking_characters.py --skip_loconet   # use Light-ASD only
 """
 
-import argparse
 import os
+import urllib.request
 from pathlib import Path
-
 
 CACHE_DIR = Path.home() / ".cache" / "talking_characters"
 
-# LoCoNet pretrained weights (AVA-ActiveSpeaker) — official Google Drive release
-# Source: https://huggingface.co/Superxixixi/LoCoNet_ASD (mirrors SJTUwxz/LoCoNet_ASD README)
-LOCONET_GDRIVE_ID = "1EX-V464jCD6S-wg68yGuAa-UcsMrw8mK"
-
-# Light-ASD pretrained weights
-LIGHT_ASD_URL = "https://github.com/Junhua-Liao/Light-ASD/raw/main/weight/pretrain_AVA_CVPR.model"
+# SyncNet pretrained weights (Chung & Zisserman ECCV 2016)
+# Hosted on the syncnet_python repo
+SYNCNET_URL = "https://www.robots.ox.ac.uk/~vgg/software/lipsync/data/syncnet_v2.model"
 
 
 def prefetch_insightface():
-    """Download InsightFace buffalo_sc model pack (SCRFD-10GF + 2d106det)."""
     print("Prefetching InsightFace buffalo_sc (SCRFD-10GF) ...")
     import insightface
     from insightface.app import FaceAnalysis
@@ -60,65 +36,45 @@ def prefetch_insightface():
     print("  InsightFace buffalo_sc OK")
 
 
-def prefetch_loconet():
-    """Download LoCoNet weights from Google Drive via gdown."""
+def prefetch_syncnet():
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    dest = CACHE_DIR / "loconet.pth"
+    dest = CACHE_DIR / "syncnet.pth"
     if dest.exists():
-        print(f"  LoCoNet already cached at {dest}")
+        print(f"  SyncNet already cached at {dest}")
         return
-    print(f"  Downloading LoCoNet → {dest} ...")
+    print(f"  Downloading SyncNet → {dest} ...")
+    # Try primary URL
     try:
-        import gdown
-    except ImportError:
-        raise ImportError(
-            "gdown is required for Google Drive downloads. "
-            "Run: pip install gdown"
-        )
-    url = f"https://drive.google.com/uc?id={LOCONET_GDRIVE_ID}"
-    gdown.download(url, str(dest), quiet=False)
-    if not dest.exists() or dest.stat().st_size < 1e6:
-        raise RuntimeError(
-            f"LoCoNet download may have failed (file missing or too small): {dest}\n"
-            "Try manually: gdown 'https://drive.google.com/uc?id=1EX-V464jCD6S-wg68yGuAa-UcsMrw8mK' -O ~/.cache/talking_characters/loconet.pth"
-        )
-    print(f"  LoCoNet OK  ({dest.stat().st_size / 1e6:.1f} MB)")
+        urllib.request.urlretrieve(SYNCNET_URL, str(dest))
+    except Exception as e:
+        print(f"  Primary URL failed ({e}), trying mirror ...")
+        # Mirror: syncnet_python GitHub release
+        mirror = "https://github.com/joonson/syncnet_python/releases/download/v1.0/syncnet_v2.model"
+        try:
+            urllib.request.urlretrieve(mirror, str(dest))
+        except Exception as e2:
+            raise RuntimeError(
+                f"SyncNet download failed from both sources.\n"
+                f"Primary: {SYNCNET_URL}\n"
+                f"Mirror:  {mirror}\n"
+                f"Error: {e2}\n\n"
+                f"Manual download:\n"
+                f"  wget {SYNCNET_URL} -O {dest}"
+            )
 
+    if not dest.exists() or dest.stat().st_size < 1e5:
+        raise RuntimeError(f"SyncNet download looks too small: {dest}")
+    print(f"  SyncNet OK  ({dest.stat().st_size / 1e6:.1f} MB)")
 
-def prefetch_light_asd():
-    """Download Light-ASD weights from repo's weight/ folder."""
-    import urllib.request
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    dest = CACHE_DIR / "light_asd.model"   # .model extension, not .pth
-    if dest.exists():
-        print(f"  Light-ASD already cached at {dest}")
-        return
-    print(f"  Downloading Light-ASD → {dest} ...")
-    urllib.request.urlretrieve(LIGHT_ASD_URL, dest)
-    if dest.stat().st_size < 1e5:
-        raise RuntimeError(f"Light-ASD download looks too small: {dest}")
-    print(f"  Light-ASD OK  ({dest.stat().st_size / 1e6:.1f} MB)")
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--skip_loconet",   action="store_true",
-                    help="Skip LoCoNet download (use Light-ASD only)")
-    ap.add_argument("--skip_light_asd", action="store_true",
-                    help="Skip Light-ASD download")
-    args = ap.parse_args()
-
     print("=== Prefetching talking-characters model weights ===")
     print(f"Cache dir: {CACHE_DIR}\n")
 
     prefetch_insightface()
+    prefetch_syncnet()
 
-    if not args.skip_loconet:
-        prefetch_loconet()
-
-    if not args.skip_light_asd:
-        prefetch_light_asd()
-
-    print("\nAll models prefetched. Safe to submit PBS job.")
+    print("\nAll models prefetched. Safe to submit SLURM job.")
 
 
 if __name__ == "__main__":

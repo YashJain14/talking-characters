@@ -139,12 +139,12 @@ class _TCNBlock(nn.Module):
     def __init__(self, d: int, dilation: int):
         super().__init__()
         self.net = nn.ModuleList([
-            nn.Identity(),                                                               # 0
-            nn.BatchNorm1d(d),                                                           # 1
-            nn.Conv1d(d, d, 3, padding=dilation, dilation=dilation, groups=d, bias=True), # 2
-            _ScalarScale(),                                                              # 3
-            _LN1d(d),                                                                    # 4
-            nn.Conv1d(d, d, 1, bias=True),                                               # 5 residual
+            nn.Identity(),                                                                # 0
+            nn.BatchNorm1d(d),                                                            # 1
+            nn.Conv1d(d, d, 3, padding=dilation, dilation=dilation, groups=d, bias=False), # 2 no bias in ckpt
+            _ScalarScale(),                                                               # 3
+            _LN1d(d),                                                                     # 4
+            nn.Conv1d(d, d, 1, bias=False),                                               # 5 no bias in ckpt
         ])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
