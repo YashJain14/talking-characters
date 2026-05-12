@@ -81,24 +81,18 @@ def _load_scrfd(device: str):
     return app
 
 
-def _decode_all_frames(video_path: str) -> tuple[list, float]:
+def _stream_frames(video_path: str):
     """
-    Decode all frames via PyAV (CPU).
-    Must be CPU decode: fractional-GPU actors (0.25 each) share a physical GPU,
-    so PyNvVideoCodec CUDA contexts would race → CUDA_ERROR_CONTEXT_IS_DESTROYED.
-    See docs/09-decode.md. PyAV is fast enough — SCRFD inference dominates.
-    Returns (frames_list, fps) where each frame is [H, W, 3] uint8 numpy.
+    Yield (frame_idx, frame_rgb, fps) one frame at a time via PyAV (CPU).
+    Streaming avoids loading the entire video into RAM — long videos at
+    1080p/30fps would otherwise consume 100+ GB of memory all at once.
     """
     import av
-    frames = []
-    fps    = 25.0
     with av.open(video_path) as container:
         stream = container.streams.video[0]
-        if stream.average_rate:
-            fps = float(stream.average_rate)
-        for frame in container.decode(video=0):
-            frames.append(frame.to_ndarray(format="rgb24"))
-    return frames, fps
+        fps = float(stream.average_rate) if stream.average_rate else 25.0
+        for frame_idx, frame in enumerate(container.decode(video=0)):
+            yield frame_idx, frame.to_ndarray(format="rgb24"), fps
 
 
 class _ByteTracker:
@@ -183,15 +177,17 @@ class DetectTrackWorker:
 
         t0 = time.perf_counter()
         try:
-            frames, fps = _decode_all_frames(video_path)
-            if not frames:
-                return {"path": video_path, "status": "failed: no frames",
-                        "n_tracks": 0}
-
-            tracker  = _ByteTracker(fps)
+            tracker: _ByteTracker | None = None
             tracks: dict[str, list] = {}
+            fps = 25.0
+            n_frames = 0
 
-            for frame_idx, frame in enumerate(frames):
+            for frame_idx, frame, frame_fps in _stream_frames(video_path):
+                if tracker is None:
+                    fps = frame_fps
+                    tracker = _ByteTracker(fps)
+                n_frames = frame_idx + 1
+
                 faces = self._detector.get(frame)
                 if not faces:
                     tracker.update(np.empty((0, 5), dtype=np.float32), frame)
@@ -208,7 +204,6 @@ class DetectTrackWorker:
                     track_id = int(row[4])
                     score    = float(row[5]) if len(row) > 5 else 1.0
 
-                    # Discard undersized faces — too small for ASD input
                     if (x2 - x1) < MIN_FACE_PX or (y2 - y1) < MIN_FACE_PX:
                         continue
 
@@ -222,6 +217,10 @@ class DetectTrackWorker:
                         "score": round(score, 4),
                     })
 
+            if n_frames == 0:
+                return {"path": video_path, "status": "failed: no frames",
+                        "n_tracks": 0}
+
             # Drop tracks with fewer than fps/2 detections (~0.5s)
             min_len = max(1, int(fps / 2))
             tracks  = {k: v for k, v in tracks.items() if len(v) >= min_len}
@@ -229,7 +228,7 @@ class DetectTrackWorker:
             result_data = {
                 "path":     video_path,
                 "fps":      round(fps, 3),
-                "n_frames": len(frames),
+                "n_frames": n_frames,
                 "n_tracks": len(tracks),
                 "tracks":   tracks,
                 "status":   "ok",
