@@ -106,14 +106,14 @@ class _VisualFrontend(nn.Module):
         self.resnet = _ResNet18ASD()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: [B, T, 112, 112]  grayscale, already normalised
-        B, T, H, W = x.shape
-        # Process each frame independently through 3D conv (T=1 per frame)
-        x = x.reshape(B * T, 1, 1, H, W)    # [B*T, 1, 1, H, W]
-        x = self.frontend3D(x)               # [B*T, 64, 1, h, w]
-        x = x.squeeze(2)                     # [B*T, 64, h, w]
-        x = self.resnet(x)                   # [B*T, 512]
-        x = x.view(B, T, 512)               # [B, T, 512]
+        # x: [N, 1, H, W]  grayscale, already normalised  (no batch dim)
+        N = x.shape[0]
+        H, W = x.shape[2], x.shape[3]
+        # Process each frame independently: treat N as batch, T=1
+        x = x.reshape(N, 1, 1, H, W)        # [N, 1, 1, H, W]
+        x = self.frontend3D(x)               # [N, 64, 1, h, w]
+        x = x.squeeze(2)                     # [N, 64, h, w]
+        x = self.resnet(x)                   # [N, 512]
         return x
 
 
@@ -381,8 +381,8 @@ class LoCoNet(nn.Module):
         core = self._m.model
 
         # ── visual stream ──────────────────────────────────────
-        vis = core.visualFrontend(face.unsqueeze(0))   # [1, N, 512]
-        vis = vis.squeeze(0).T.unsqueeze(0)             # [1, 512, N]
+        vis = core.visualFrontend(face)                 # [N, 512]
+        vis = vis.T.unsqueeze(0)                        # [1, 512, N]
         vis = core.visualTCN(vis)                       # [1, 512, N]
         vis = core.visualConv1D(vis)                    # [1, 128, N]
 
