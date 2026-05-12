@@ -49,15 +49,19 @@ NUM_GPUS=1
 ACTORS_PER_GPU=1
 INGEST_WORKERS=4
 
-# SyncNet confidence threshold: 5.0 = clearly synced.
-# Lower to 3.0 if too few clips are produced.
-SYNC_THRESHOLD=5.0
+# SyncNet confidence threshold: median_dist - min_dist.
+# Typical values: speaking=3-10, non-speaking/silence=0-2.
+# Start at 3.0; raise to 5.0 once audio is confirmed working.
+SYNC_THRESHOLD=3.0
 
 GAP_BRIDGE_S=0.5   # bridge speaking gaps shorter than this
 MIN_CLIP_S=3.0
 MAX_CLIP_S=60.0
 
 FROM_STAGE=syncnet_score   # resume: ingest | detect_track | syncnet_score | segment_export
+
+# Clear stale sync cache so audio fix takes effect on re-score
+rm -f "$SCRATCH_TC"/sync/*.sync.json
 
 # ── GPU concurrency summary (1x V100-32GB) ───────────────────────────────────
 # ingest:         CPU-only → 4 yt-dlp threads

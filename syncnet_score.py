@@ -58,7 +58,7 @@ import torch.nn.functional as F
 import ray
 import wandb
 
-SYNC_THRESHOLD = 5.0     # min mean confidence to consider a track as speaking
+SYNC_THRESHOLD = 3.0     # min confidence to pass (median_dist - min_dist); overridden by --sync_threshold
 FACE_SIZE      = 224     # face crop size fed to SyncNet visual stream (official repo uses 224)
 CROP_PAD       = 0.25    # padding around face bbox for SyncNet (tighter than export)
 AUDIO_SR       = 16000
@@ -208,14 +208,24 @@ def _extract_audio(video_path: str, sr: int = AUDIO_SR) -> np.ndarray | None:
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         tmp_path = tmp.name
     try:
-        subprocess.run(
+        r = subprocess.run(
             ["ffmpeg", "-y", "-i", video_path,
-             "-ac", "1", "-ar", str(sr), "-f", "wav", tmp_path],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True,
+             "-vn", "-ac", "1", "-ar", str(sr), "-acodec", "pcm_s16le", tmp_path],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
         )
+        if r.returncode != 0:
+            log.warning(
+                f"ffmpeg audio extract failed (exit={r.returncode}) for {Path(video_path).name}:\n"
+                + r.stderr.decode(errors="replace")[-500:]
+            )
+            return None
+        if not Path(tmp_path).exists() or Path(tmp_path).stat().st_size < 100:
+            log.warning(f"audio WAV missing or empty for {Path(video_path).name}")
+            return None
         wav, _ = sf.read(tmp_path, dtype="float32")
         return wav
-    except Exception:
+    except Exception as e:
+        log.warning(f"_extract_audio exception for {Path(video_path).name}: {e}")
         return None
     finally:
         Path(tmp_path).unlink(missing_ok=True)
