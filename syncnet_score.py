@@ -74,69 +74,102 @@ log = logging.getLogger("syncnet_score")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SyncNet model  (Chung & Zisserman ECCV 2016, "out-of-time" variant)
-# Visual stream : 5×112×112 grayscale face crops → 1024-d embedding
-# Audio stream  : 1×13×20 MFCC window           → 1024-d embedding
+# SyncNet model  (Chung & Zisserman ECCV 2016, syncnet_v2.model checkpoint)
+#
+# Checkpoint key names (flat on the model, no submodule wrappers):
+#   netcnnlip.*  — visual (lip) CNN  — Conv3d stream
+#   netfclip.*   — visual FC
+#   netcnnaud.*  — audio CNN         — Conv2d stream
+#   netfcaud.*   — audio FC
+#
+# CNN index layout (same for both streams):
+#   0,1   Conv+BN   2  ReLU   3  Pool
+#   4,5   Conv+BN   6  ReLU   7  Pool
+#   8,9   Conv+BN   10 ReLU
+#   11,12 Conv+BN   13 ReLU
+#   14,15 Conv+BN   16 ReLU
+#   17    Pool
+#   18,19 Conv+BN   20 ReLU
 # ─────────────────────────────────────────────────────────────────────────────
-
-class _SyncNetVisual(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.features = nn.Sequential(
-            nn.Conv3d(1,  96, (5,7,7), stride=(1,2,2), padding=0), nn.BatchNorm3d(96),  nn.ReLU(),
-            nn.MaxPool3d((1,3,3), stride=(1,2,2)),
-            nn.Conv3d(96, 256,(1,5,5), stride=(1,2,2), padding=(0,1,1)), nn.BatchNorm3d(256), nn.ReLU(),
-            nn.MaxPool3d((1,3,3), stride=(1,2,2)),
-            nn.Conv3d(256,256,(1,3,3), padding=(0,1,1)), nn.BatchNorm3d(256), nn.ReLU(),
-            nn.Conv3d(256,256,(1,3,3), padding=(0,1,1)), nn.BatchNorm3d(256), nn.ReLU(),
-            nn.Conv3d(256,256,(1,3,3), padding=(0,1,1)), nn.BatchNorm3d(256), nn.ReLU(),
-            nn.MaxPool3d((1,3,3), stride=(1,2,2)),
-        )
-        self.fc = nn.Sequential(
-            nn.Linear(256*4*4, 512), nn.BatchNorm1d(512), nn.ReLU(),
-            nn.Linear(512, 512),
-        )
-
-    def forward(self, x):   # x: [B, 1, 5, 112, 112]
-        h = self.features(x)
-        h = h.view(h.size(0), -1)
-        return self.fc(h)   # [B, 512]  (actual syncnet uses 1024 but we normalise)
-
-
-class _SyncNetAudio(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.features = nn.Sequential(
-            nn.Conv2d(1,  96, (3,3), stride=(1,1), padding=(1,1)), nn.BatchNorm2d(96),  nn.ReLU(),
-            nn.MaxPool2d((1,1), stride=(1,1)),
-            nn.Conv2d(96, 256,(3,3), stride=(1,1), padding=(1,1)), nn.BatchNorm2d(256), nn.ReLU(),
-            nn.MaxPool2d((1,1), stride=(1,1)),
-            nn.Conv2d(256,384,(3,3), padding=(1,1)), nn.BatchNorm2d(384), nn.ReLU(),
-            nn.Conv2d(384,256,(3,3), padding=(1,1)), nn.BatchNorm2d(256), nn.ReLU(),
-            nn.Conv2d(256,256,(3,3), padding=(1,1)), nn.BatchNorm2d(256), nn.ReLU(),
-            nn.MaxPool2d((3,1), stride=(2,1)),
-        )
-        self.fc = nn.Sequential(
-            nn.Linear(256*1*20, 512), nn.BatchNorm1d(512), nn.ReLU(),
-            nn.Linear(512, 512),
-        )
-
-    def forward(self, x):   # x: [B, 1, 13, 20]
-        h = self.features(x)
-        h = h.view(h.size(0), -1)
-        return self.fc(h)   # [B, 512]
-
 
 class SyncNet(nn.Module):
     def __init__(self):
         super().__init__()
-        self.visual = _SyncNetVisual()
-        self.audio  = _SyncNetAudio()
+        # Visual (lip) stream: input [B, 1, 5, 112, 112]
+        self.netcnnlip = nn.Sequential(
+            nn.Conv3d(1,   96,  (5,7,7), stride=(1,2,2), padding=0),  # 0
+            nn.BatchNorm3d(96),                                         # 1
+            nn.ReLU(),                                                  # 2
+            nn.MaxPool3d((1,3,3), stride=(1,2,2)),                     # 3
+            nn.Conv3d(96,  256, (1,5,5), stride=(1,2,2), padding=(0,1,1)), # 4
+            nn.BatchNorm3d(256),                                        # 5
+            nn.ReLU(),                                                  # 6
+            nn.MaxPool3d((1,3,3), stride=(1,2,2)),                     # 7
+            nn.Conv3d(256, 256, (1,3,3), padding=(0,1,1)),             # 8
+            nn.BatchNorm3d(256),                                        # 9
+            nn.ReLU(),                                                  # 10
+            nn.Conv3d(256, 256, (1,3,3), padding=(0,1,1)),             # 11
+            nn.BatchNorm3d(256),                                        # 12
+            nn.ReLU(),                                                  # 13
+            nn.Conv3d(256, 256, (1,3,3), padding=(0,1,1)),             # 14
+            nn.BatchNorm3d(256),                                        # 15
+            nn.ReLU(),                                                  # 16
+            nn.MaxPool3d((1,3,3), stride=(1,2,2)),                     # 17
+            nn.Conv3d(256, 256, (1,1,1), padding=0),                   # 18
+            nn.BatchNorm3d(256),                                        # 19
+            nn.ReLU(),                                                  # 20
+        )
+        self.netfclip = nn.Sequential(
+            nn.Linear(256*1*2*2, 512),  # 0  flattened after last pool+conv: [B,256,1,2,2]
+            nn.BatchNorm1d(512),         # 1
+            nn.ReLU(),                   # 2
+            nn.Linear(512, 1024),        # 3
+        )
+
+        # Audio stream: input [B, 1, 13, 20]
+        self.netcnnaud = nn.Sequential(
+            nn.Conv2d(1,   96,  (3,3), stride=(1,1), padding=(1,1)),  # 0
+            nn.BatchNorm2d(96),                                         # 1
+            nn.ReLU(),                                                  # 2
+            nn.MaxPool2d((1,1), stride=(1,1)),                         # 3
+            nn.Conv2d(96,  256, (3,3), stride=(1,1), padding=(1,1)),  # 4
+            nn.BatchNorm2d(256),                                        # 5
+            nn.ReLU(),                                                  # 6
+            nn.MaxPool2d((1,1), stride=(1,1)),                         # 7
+            nn.Conv2d(256, 384, (3,3), padding=(1,1)),                 # 8
+            nn.BatchNorm2d(384),                                        # 9
+            nn.ReLU(),                                                  # 10
+            nn.Conv2d(384, 256, (3,3), padding=(1,1)),                 # 11
+            nn.BatchNorm2d(256),                                        # 12
+            nn.ReLU(),                                                  # 13
+            nn.Conv2d(256, 256, (3,3), padding=(1,1)),                 # 14
+            nn.BatchNorm2d(256),                                        # 15
+            nn.ReLU(),                                                  # 16
+            nn.MaxPool2d((3,1), stride=(2,1)),                         # 17
+            nn.Conv2d(256, 256, (1,1), padding=0),                     # 18
+            nn.BatchNorm2d(256),                                        # 19
+            nn.ReLU(),                                                  # 20
+        )
+        self.netfcaud = nn.Sequential(
+            nn.Linear(256*1*20, 512),  # 0  (after pool: [B,256,1,20])
+            nn.BatchNorm1d(512),        # 1
+            nn.ReLU(),                  # 2
+            nn.Linear(512, 1024),       # 3
+        )
 
     def forward(self, face_seq, mfcc_win):
-        v = F.normalize(self.visual(face_seq), p=2, dim=1)
-        a = F.normalize(self.audio(mfcc_win),  p=2, dim=1)
-        return (v * a).sum(dim=1)   # cosine similarity per window
+        # face_seq: [B, 1, 5, H, W]   mfcc_win: [B, 1, 13, 20]
+        v = self.netcnnlip(face_seq)
+        v = v.view(v.size(0), -1)
+        v = self.netfclip(v)                   # [B, 1024]
+
+        a = self.netcnnaud(mfcc_win)
+        a = a.view(a.size(0), -1)
+        a = self.netfcaud(a)                   # [B, 1024]
+
+        v = F.normalize(v, p=2, dim=1)
+        a = F.normalize(a, p=2, dim=1)
+        return (v * a).sum(dim=1)              # cosine similarity
 
 
 def _load_syncnet(device: str) -> SyncNet:
@@ -154,7 +187,16 @@ def _load_syncnet(device: str) -> SyncNet:
     # Handle DataParallel wrapper
     if any(k.startswith("module.") for k in state):
         state = {k[len("module."):]: v for k, v in state.items()}
-    model.load_state_dict(state)
+    # Log top-level key prefixes to aid debugging
+    prefixes = sorted({k.split(".")[0] for k in state})
+    log.info(f"SyncNet checkpoint top-level keys: {prefixes}")
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    if missing:
+        log.warning(f"SyncNet: {len(missing)} missing keys: {missing[:5]}...")
+    if unexpected:
+        log.warning(f"SyncNet: {len(unexpected)} unexpected keys: {unexpected[:5]}...")
+    if not missing and not unexpected:
+        log.info("SyncNet: weights loaded perfectly (strict)")
     model.eval()
     return model.to(device)
 
