@@ -159,7 +159,18 @@ def _load_loconet(device: str):
     state = torch.load(weights, map_location=device, weights_only=False)
     model.load_state_dict(state)
     model.eval()
-    return model.to(device)
+    model = model.to(device)
+
+    # Sanity: varied random inputs should produce varied logits
+    with torch.inference_mode():
+        _f = torch.rand(4, 3, 112, 112, device=device)
+        _m = torch.rand(4, 9, 13, device=device)
+        _out = model(_f, _m)
+        _probs = torch.sigmoid(_out)
+        log.info(f"LoCoNet sanity — logits {[round(float(x),3) for x in _out]}, "
+                 f"probs {[round(float(p),3) for p in _probs]}")
+
+    return model
 
 
 def _load_light_asd(device: str):
