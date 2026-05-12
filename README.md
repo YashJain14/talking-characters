@@ -1,4 +1,4 @@
-# Talking Characters — Video Data Curation Pipeline
+# Talking Characters — Single-Speaker Clip Curation from Multi-Speaker Videos
 
 End-to-end pipeline that takes a CSV of YouTube URLs and produces clean, single-speaker talking-head clips ready for video diffusion training.
 
@@ -124,6 +124,16 @@ Weights: `~/.cache/talking_characters/syncnet.pth`
 1. **Black bars** — scan row/col mean luminance < 16, crop if found
 2. **Two-person shot** — bisect frame at midpoint between face centres, keep active-speaker half
 3. **Panel shots** — rejected entirely (face too small to crop cleanly at export resolution)
+
+---
+
+## Tested On
+
+| Video | Label | Clips Extracted | Notes |
+|-------|-------|-----------------|-------|
+| [youtube.com/watch?v=57lDpTwiW6g](https://www.youtube.com/watch?v=57lDpTwiW6g) | YC | 101 | Human characters, multi-speaker |
+| [youtube.com/watch?v=UPGB-hsAoVY](https://www.youtube.com/watch?v=UPGB-hsAoVY) | — | 38 | Human characters |
+| [youtube.com/watch?v=8kkosuO2AII](https://www.youtube.com/watch?v=8kkosuO2AII) | Naruto | 6 | Animated — pipeline struggles |
 
 ---
 
