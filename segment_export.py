@@ -140,7 +140,8 @@ def _find_clips(
             for k in kept
         )
         if overlaps:
-            rejected.append({**clip, "reject_reason": "overlap_lost_to_higher_conf"})
+            dur = round((clip["end_frame"] - clip["start_frame"]) / fps, 2)
+            rejected.append({**clip, "duration_s": dur, "reject_reason": "overlap_lost_to_higher_conf"})
         else:
             kept.append(clip)
     clips = kept
@@ -307,9 +308,10 @@ class SegmentWorker:
                 f"  (gap_bridge={GAP_BRIDGE_S}s  min={MIN_CLIP_S}s  max={MAX_CLIP_S}s)"
             )
             for rc in rejected_clips:
+                dur = rc.get("duration_s") or (rc["end_frame"] - rc["start_frame"]) / fps
                 log.info(
                     f"    REJECTED: track={rc['track_id']}"
-                    f"  dur={rc['duration_s']:.1f}s"
+                    f"  dur={dur:.1f}s"
                     f"  reason={rc['reject_reason']}"
                 )
             for i, c in enumerate(clips):
