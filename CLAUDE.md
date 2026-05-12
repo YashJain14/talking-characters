@@ -17,12 +17,12 @@ Compute nodes have no internet — all model weights must be prefetched on the l
 
 ```bash
 # Full run from CSV
-python dag_talking_characters.py --csv videos.csv --num_gpus 1
+python dag_talking_characters.py --csv videos_test.csv --num_gpus 1
 
 # Resume from a specific stage
-python dag_talking_characters.py --csv videos.csv --from_stage detect_track
-python dag_talking_characters.py --csv videos.csv --from_stage syncnet_score
-python dag_talking_characters.py --csv videos.csv --from_stage segment_export
+python dag_talking_characters.py --csv videos_test.csv --from_stage detect_track
+python dag_talking_characters.py --csv videos_test.csv --from_stage syncnet_score
+python dag_talking_characters.py --csv videos_test.csv --from_stage segment_export
 ```
 
 Valid `--from_stage`: `ingest  detect_track  syncnet_score  segment_export`
@@ -40,24 +40,59 @@ ingest → detect_track → syncnet_score → segment_export
 | Script | Model | GPU | Purpose |
 |--------|-------|-----|---------|
 | `ingest.py` | — | CPU | yt-dlp download from CSV → `raw_videos/<label>/<id>.mp4` |
-| `detect_track.py` | SCRFD-10GF (InsightFace buffalo_sc) | 0.25/actor | Per-frame face detection + ByteTrack |
+| `detect_track.py` | SCRFD-10GF (InsightFace buffalo_sc) | 1.0/actor | Per-frame face detection + ByteTrack |
 | `syncnet_score.py` | SyncNet (~5M params) | 1.0/actor | Audio-visual sync confidence per face track |
-| `segment_export.py` | — | CPU | Clip extraction + content-aware crop via ffmpeg |
+| `segment_export.py` | — | CPU | Quality gates + clip extraction via ffmpeg |
 
 ### How it works
 
 1. **ingest**: Download videos from CSV via yt-dlp
-2. **detect_track**: SCRFD detects faces every frame; ByteTrack assigns persistent IDs. Outputs `<stem>.tracks.json` per video.
-3. **syncnet_score**: For each face track, extract lip crops + MFCC audio windows, run SyncNet in a sliding 25-frame window. A track **passes** if mean confidence ≥ `SYNC_THRESHOLD` (default 5.0). Outputs `<stem>.sync.json` per video.
-4. **segment_export**: For each passing track, split on long gaps, apply duration/face-ratio gates, export via ffmpeg with black-bar and multi-speaker crop.
+2. **detect_track**: SCRFD detects faces every frame; ByteTrack assigns persistent IDs. Outputs `<stem>.tracks.json` with per-track stats (face size, concurrent face count).
+3. **syncnet_score**: For each face track, extract lip crops + MFCC audio windows, run SyncNet in a sliding 25-frame window. Outputs `<stem>.sync.json` with confidence, reject_reason, face size per track.
+4. **segment_export**: Winner-takes-all per time segment, panel/nodder gates, ffmpeg export with black-bar and two-person crop.
 
 ### SyncNet scoring
 
-SyncNet measures whether a face's lip movements are in sync with the audio. High confidence (>5) = person is actively speaking. This replaces LoCoNet ASD — it's more reliable and doesn't require a custom model implementation.
+- `confidence = median(pairwise_dist) - min(pairwise_dist)` with vshift=15
+- Solo close-ups score 1.0–3.0; two-person shots 0.3–0.9; panel shots 0.0–0.4
+- Weights: `~/.cache/talking_characters/syncnet.pth`
 
-- `sync_threshold=5.0` — lower to 3.0 if too few clips, raise to 7.0 to be stricter
-- Sliding window: 25 frames (1s at 25fps), stride 5 frames
-- CPU fallback works if GPU is unavailable (slower)
+### Quality Gates (segment_export.py)
+
+| Gate | Value | Catches |
+|------|-------|---------|
+| Panel shot | n\_other ≥ 2 → reject | 5-person wide shots |
+| Two-person confidence | n\_other=1 → conf ≥ 0.8 | Nodders, listeners |
+| Solo confidence | n\_other=0 → conf ≥ 0.3 | Non-speakers |
+| Winner-takes-all | highest conf per overlap group | Duplicate time ranges |
+| Face present ratio | ≥ 80% | Partial tracks |
+| Clip duration | 3–60s | Too short/long |
+
+### segments.json format
+
+```json
+{
+  "clips": [
+    {
+      "track_id": "26",
+      "start_s": 54.1, "end_s": 59.0, "duration_s": 4.9,
+      "sync_confidence": 3.064,
+      "n_faces_in_frame": 0,
+      "median_face_px": 317.0,
+      "had_black_bars": false,
+      "had_extra_speaker": false
+    }
+  ],
+  "rejected_clips": [
+    {
+      "track_id": "33",
+      "reject_reason": "overlap_lost_to_higher_conf"
+    }
+  ]
+}
+```
+
+Reject reasons: `too_short` · `too_long` · `low_face_ratio` · `overlap_lost_to_higher_conf` · `panel_shot` · `low_conf_for_scene_type`
 
 ### Input CSV Format
 
@@ -68,28 +103,13 @@ https://www.youtube.com/watch?v=abc123,speaker_name
 
 `label` is optional — videos go into `raw_videos/unlabelled/` if omitted.
 
-### Crop Logic (segment_export.py)
-
-1. **Black bars** — always: scan row/col mean luminance < 16, crop if found
-2. **Other speakers** — only when another face track overlaps this clip's time range: bisect at midpoint between face centres, keep active-speaker half
-3. **Slides/no-face** — discarded automatically (no face tracks → no sync score → no clips)
-
 ### Caching
 
-Each stage writes per-video result files:
+Each stage writes per-video result files and skips if already present:
 - `tracks/<stem>.tracks.json` — detect_track output
 - `sync/<stem>.sync.json` — syncnet_score output
+- `clips/<stem>/.done` — segment_export done marker
 - `clips/<stem>/*.mp4` + `*.json` — exported clips
-
-### Quality Gates
-
-| Gate | Value | Where |
-|------|-------|-------|
-| Min face size | 128px | detect_track.py |
-| Min track length | fps/2 frames | detect_track.py |
-| SyncNet confidence | ≥ 5.0 | syncnet_score.py |
-| Face present ratio | ≥ 80% of clip frames | segment_export.py |
-| Clip duration | 3–60s | segment_export.py |
 
 ## Key Constraints
 
@@ -97,3 +117,5 @@ Each stage writes per-video result files:
 - **`WANDB_API_KEY`** must be exported before `sbatch`
 - **`HF_HUB_OFFLINE=1`** on compute nodes
 - SyncNet weights must be at `~/.cache/talking_characters/syncnet.pth`
+- `MIN_FACE_PX=64` in detect_track — captures two-person shots (was 128, dropped 56k panel detections)
+- `SYNC_THRESHOLD=0.3` in run_job.slurm — per-scene thresholds applied in segment_export

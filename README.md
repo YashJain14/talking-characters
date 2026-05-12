@@ -1,9 +1,9 @@
 # Talking Characters — Video Data Curation Pipeline
 
-End-to-end pipeline that takes a CSV of YouTube video URLs and produces clean, single-speaker talking-head clips ready for video diffusion training.
+End-to-end pipeline that takes a CSV of YouTube URLs and produces clean, single-speaker talking-head clips ready for video diffusion training.
 
-**Hardware target:** NVIDIA A100-SXM4-40GB · CUDA 12.4 · PyTorch 2.6  
-**Cluster:** NSCC HPC · PBS scheduler · 4× A100 GPUs per node
+**Hardware target:** NVIDIA V100-32GB · CUDA 12.4 · PyTorch 2.6  
+**Cluster:** SLURM · `UGGPU-TC1` partition
 
 ---
 
@@ -17,133 +17,118 @@ videos.csv  (YouTube URLs)
        │                                CPU, 4 parallel threads
        ▼
 [detect_track.py]     SCRFD-10GF face detection + ByteTrack
-       │               0.25 GPU/actor → 16 concurrent actors
+       │               1 GPU/actor, min face size 64px
        ▼
-[active_speaker.py]   LoCoNet active speaker detection
-       │               per-frame speaking score per face track
-       │               0.5 GPU/actor → 8 concurrent actors
+[syncnet_score.py]    SyncNet audio-visual lip-sync scoring
+       │               1 GPU/actor, confidence = median_dist - min_dist
        ▼
-[segment_export.py]   Find single-speaker segments
-                       remove black bars, split frame if extra speaker present
-                       re-encode via ffmpeg → clips/<stem>/<clip>.mp4
+[segment_export.py]   Quality gates + ffmpeg clip export
+                       winner-takes-all per time segment
+                       panel shot rejection, nodder filtering
 ```
 
-Orchestrated by `dag_talking_characters.py` (Prefect flow). Resume from any stage with `--from_stage`.
+Orchestrated by `dag_talking_characters.py`. Resume from any stage with `--from_stage`.
+
+---
+
+## Quick Start
+
+### One-time setup (login node only)
+
+```bash
+bash setup_env.sh
+source talking_character/bin/activate
+python prefetch_models_talking_characters.py   # downloads SyncNet weights
+export WANDB_API_KEY=<your_key>
+```
+
+Compute nodes have no internet — weights must be prefetched on the login node first.
+
+### Run
+
+```bash
+sbatch run_job.slurm
+```
+
+### Resume from a stage
+
+```bash
+python dag_talking_characters.py --csv videos_test.csv --from_stage detect_track
+python dag_talking_characters.py --csv videos_test.csv --from_stage syncnet_score
+python dag_talking_characters.py --csv videos_test.csv --from_stage segment_export
+```
 
 ---
 
 ## Input CSV Format
 
-One video per row. Supported formats:
-
-```csv
-url
-https://www.youtube.com/watch?v=abc123
-https://youtu.be/xyz789
-```
-
 ```csv
 url,label
-https://www.youtube.com/watch?v=abc123,elon_musk
-https://youtu.be/xyz789,lex_fridman
+https://www.youtube.com/watch?v=abc123,speaker_name
+https://youtu.be/xyz789,another_speaker
 ```
 
-If no `label` column is present, all videos go into `raw_videos/unlabelled/`.
-
----
-
-## Setup & Running
-
-### One-time setup (login node)
-
-```bash
-bash setup_env.sh
-conda activate talking_characters_env
-python prefetch_models_talking_characters.py
-```
-
-Compute nodes have no internet (`HF_HUB_OFFLINE=1`). All model weights must be prefetched on the login node.
-
-### Full pipeline
-
-```bash
-export WANDB_API_KEY=<your_key>
-# Edit INPUT_CSV in run_talking_characters.pbs to point to your CSV
-qsub run_talking_characters.pbs
-```
-
-### Direct invocation / resume
-
-```bash
-# Full run
-python dag_talking_characters.py --csv videos.csv --num_gpus 4
-
-# Resume from a stage
-python dag_talking_characters.py --csv videos.csv --num_gpus 4 --from_stage detect_track
-python dag_talking_characters.py --csv videos.csv --num_gpus 4 --from_stage active_speaker
-python dag_talking_characters.py --csv videos.csv --num_gpus 4 --from_stage segment_export
-```
-
-Valid `--from_stage`: `ingest  detect_track  active_speaker  segment_export`
+`label` is optional — goes into `raw_videos/unlabelled/` if omitted.
 
 ---
 
 ## Output Layout
 
 ```
-$SCRATCH_TC/                                    # ~/scratch/talking-characters
-├── raw_videos/<label>/<video_id>.mp4           # downloaded videos
-├── tracks/<stem>.tracks.json                   # face bboxes + ByteTrack IDs per frame
-├── asd/<stem>.asd.json                         # LoCoNet speaking scores per track per frame
-├── clips/<stem>/<stem>_<tid>_<s>_<e>.mp4      # exported single-speaker clips
-├── clips/<stem>/<stem>_<tid>_<s>_<e>.json     # per-clip metadata
-└── clips/segments.json                         # aggregated manifest of all clips
+$SCRATCH_TC/                                       # ~/scratch/talking-characters
+├── raw_videos/<label>/<video_id>.mp4              # downloaded videos
+├── tracks/<stem>.tracks.json                      # face bboxes + track IDs + stats
+├── sync/<stem>.sync.json                          # SyncNet confidence per track
+└── clips/
+    ├── <stem>/<stem>_<tid>_<sf>_<ef>.mp4         # exported clips
+    ├── <stem>/<stem>_<tid>_<sf>_<ef>.json        # per-clip metadata
+    └── segments.json                              # aggregated manifest
+                                                   #   {"clips": [...], "rejected_clips": [...]}
 ```
-
----
-
-## GPU Concurrency
-
-| Stage | GPU fraction | Concurrent actors (4 GPUs) |
-|-------|-------------|---------------------------|
-| ingest | CPU only | 4 yt-dlp threads |
-| detect_track | 0.25 | 16 (SCRFD-10GF, CPU decode) |
-| active_speaker | 0.5 | 8 (LoCoNet 34M params) |
-| segment_export | CPU only | 16 workers (ffmpeg) |
-
-All Ray GPU actors use PyAV CPU decode — fractional actors share a physical GPU, so PyNvVideoCodec CUDA contexts race.
-
----
-
-## Models
-
-| Model | Used in | Notes |
-|-------|---------|-------|
-| SCRFD-10GF (InsightFace buffalo_sc) | `detect_track.py` | 95.2% AP WIDER FACE hard, 3× faster than RetinaFace |
-| LoCoNet | `active_speaker.py` | 95.2% mAP AVA, +3% over TalkNet in multi-speaker scenes |
-| Light-ASD | `active_speaker.py` | Fallback — 94.1% mAP, 0.84M params, faster |
 
 ---
 
 ## Quality Gates
 
-| Gate | Default | Notes |
-|------|---------|-------|
-| Min face size | 128px | Tracks with smaller faces are dropped |
-| Min track length | fps/2 frames | Drops sub-0.5s flickers |
-| Active ratio | ≥ 60% | Clip frames must have exactly one speaker active |
-| Face present ratio | ≥ 80% | Face must be visible most of the clip |
+Applied in order during `segment_export.py`:
+
+| Gate | Value | Reason |
+|------|-------|--------|
+| Min face size (detect) | 64px | Smaller faces unreliable for SyncNet |
+| Min track length | fps/2 frames | Drop sub-0.5s flickers |
+| SyncNet confidence (solo) | ≥ 0.3 | Solo close-up, reliable scoring |
+| SyncNet confidence (2-person) | ≥ 0.8 | Filter nodders from two-person shots |
+| Panel shot rejection | n\_other ≥ 2 | Too small to crop cleanly |
+| Winner-takes-all | highest conf wins | One clip per time segment |
+| Face present ratio | ≥ 80% | Face visible most of clip |
 | Clip duration | 3–60s | |
+
+---
+
+## SyncNet Scoring
+
+SyncNet (Chung & Zisserman, ECCV 2016) measures whether lip movements match the audio.
+
+- `confidence = median(pairwise_dist) - min(pairwise_dist)`
+- Solo close-ups typically score 1.0–3.0
+- Two-person shots score 0.3–0.9 (real speakers) or 0.1–0.5 (nodders)
+- Panel shots (5 people, face ~65px) score 0.0–0.4 → rejected by panel gate
+
+Weights: `~/.cache/talking_characters/syncnet.pth`
+
+---
 
 ## Crop Logic
 
-Black bars are detected and removed on every clip by scanning row/column mean luminance. If a second speaker's face is tracked in the same segment, the frame is split at the midpoint between the two face centres and only the active-speaker half is kept. No fixed margin is applied — content that isn't junk is preserved.
+1. **Black bars** — scan row/col mean luminance < 16, crop if found
+2. **Two-person shot** — bisect frame at midpoint between face centres, keep active-speaker half
+3. **Panel shots** — rejected entirely (face too small to crop cleanly at export resolution)
 
 ---
 
 ## Key Constraints
 
-- **`numpy < 2`** — some dependencies are built against NumPy 1.x ABI
-- **`opencv-python-headless < 4.11`** — OpenCV ≥ 4.11 uses NumPy 2 ABI
-- **`WANDB_API_KEY` must be exported before `qsub`** — compute nodes have no interactive login
-- **`HF_HUB_OFFLINE=1`** on compute nodes — run `prefetch_models_talking_characters.py` first
+- **`numpy < 2`** and **`opencv-python-headless < 4.11`** — ABI constraints
+- **`WANDB_API_KEY`** must be set before `sbatch`
+- **`HF_HUB_OFFLINE=1`** on compute nodes
+- SyncNet weights at `~/.cache/talking_characters/syncnet.pth`
