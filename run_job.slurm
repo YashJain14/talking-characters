@@ -91,6 +91,7 @@ echo "Job completed at $(date)"
 # ── Copy clips into repo for inspection ───────────────────────────────────────
 CLIPS_DEST="$HOME/talking-characters/output_clips"
 mkdir -p "$CLIPS_DEST"
+rm -f "$CLIPS_DEST"/*.mp4
 cp -r "$SCRATCH_TC/clips/"*/*.mp4 "$CLIPS_DEST/" 2>/dev/null || true
 cp "$SCRATCH_TC/clips/segments.json" "$CLIPS_DEST/" 2>/dev/null || true
 echo "Clips copied to $CLIPS_DEST  ($(ls "$CLIPS_DEST"/*.mp4 2>/dev/null | wc -l) mp4s)"
