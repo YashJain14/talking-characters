@@ -213,24 +213,33 @@ def _score_track(
     fps: float,
     model: SyncNet,
     device: str,
+    debug_log=None,
 ) -> tuple[float, int]:
     """
     Slide a 25-frame window over the track.
     Returns (mean_confidence, best_offset).
-    Offset search: try offsets -5..+5 frames, pick the one with highest confidence.
     """
     N = len(face_crops)
     if N < WINDOW_FRAMES:
+        if debug_log:
+            debug_log(f"    _score_track: only {N} frames < {WINDOW_FRAMES} minimum → skip")
         return 0.0, 0
 
     mfcc_per_frame = 100.0 / fps   # MFCC frames per video frame
-
     confidences = []
     best_offset = 0
+    n_windows = 0
+
+    if debug_log:
+        debug_log(
+            f"    _score_track: {N} face frames  mfcc={mfcc.shape}  fps={fps:.2f}"
+            f"  mfcc_per_frame={mfcc_per_frame:.2f}  device={device}"
+        )
 
     # Slide with stride=5 frames
     for start in range(0, N - WINDOW_FRAMES + 1, max(1, WINDOW_FRAMES // 5)):
         end = start + WINDOW_FRAMES
+        n_windows += 1
 
         # Visual: 5 evenly-spaced frames from the window
         v_indices = np.linspace(start, end - 1, 5, dtype=int)
@@ -248,8 +257,6 @@ def _score_track(
             a_start = max(0, a_end - WINDOW_FRAMES * MFCC_PER_FRAME)
 
         mfcc_slice = mfcc[a_start:a_end]    # [~100, 13]
-        # SyncNet audio input: [1, 13, 20] — take first 20 cols of 13-dim MFCC
-        # Reshape: treat each MFCC frame as a column
         target_cols = WINDOW_FRAMES * MFCC_PER_FRAME // 5   # 20
         if len(mfcc_slice) < target_cols:
             mfcc_slice = np.pad(mfcc_slice, ((0, target_cols - len(mfcc_slice)), (0, 0)))
@@ -263,10 +270,26 @@ def _score_track(
 
         confidences.append(conf)
 
+        if debug_log and n_windows <= 3:
+            debug_log(
+                f"    window[{n_windows}]: frames[{start}:{end}]"
+                f"  a_mfcc=[{a_start}:{a_end}]"
+                f"  face_t={tuple(face_t.shape)}  aud_t={tuple(aud_t.shape)}"
+                f"  conf={conf:.4f}"
+            )
+
     if not confidences:
+        if debug_log:
+            debug_log(f"    _score_track: 0 windows scored")
         return 0.0, 0
 
-    return float(np.mean(confidences)), best_offset
+    mean_conf = float(np.mean(confidences))
+    if debug_log:
+        debug_log(
+            f"    _score_track done: {n_windows} windows  "
+            f"conf min={min(confidences):.3f} max={max(confidences):.3f} mean={mean_conf:.3f}"
+        )
+    return mean_conf, best_offset
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -285,15 +308,20 @@ class SyncNetWorker:
     def process(self, video_path: str, track_path: str, out_dir: str) -> dict:
         out_path = Path(out_dir) / (Path(video_path).stem + ".sync.json")
         if out_path.exists():
+            self._log.info(f"CACHED {Path(video_path).name}")
             return {"path": video_path, "status": "cached"}
 
+        stem = Path(video_path).name
+        self._log.info(f"START {stem}")
         t0 = time.perf_counter()
         try:
             track_data = json.loads(Path(track_path).read_text())
             tracks     = track_data.get("tracks", {})
             fps        = float(track_data.get("fps", 25.0))
+            self._log.info(f"  {stem}: fps={fps:.2f}  n_tracks={len(tracks)}")
 
             if not tracks:
+                self._log.warning(f"  {stem}: no tracks found in track file — skipping")
                 result = {"path": video_path, "fps": fps, "tracks": {}, "status": "ok",
                           "time_s": round(time.perf_counter() - t0, 3)}
                 Path(out_dir).mkdir(parents=True, exist_ok=True)
@@ -306,6 +334,7 @@ class SyncNetWorker:
             for detections in tracks.values():
                 for d in detections:
                     needed.add(d["frame"])
+            self._log.info(f"  {stem}: need {len(needed)} unique frames from {len(tracks)} tracks")
 
             frame_cache: dict[int, np.ndarray] = {}
             with av.open(video_path) as container:
@@ -314,10 +343,18 @@ class SyncNetWorker:
                         frame_cache[fi] = frame.to_ndarray(format="rgb24")
                     if len(frame_cache) == len(needed):
                         break
+            self._log.info(f"  {stem}: decoded {len(frame_cache)}/{len(needed)} needed frames")
 
             wav  = _extract_audio(video_path)
-            mfcc = _compute_mfcc(wav, AUDIO_SR) if wav is not None else \
-                   np.zeros((1, N_MFCC), dtype=np.float32)
+            if wav is None:
+                self._log.warning(f"  {stem}: audio extraction failed — using silence")
+                mfcc = np.zeros((1, N_MFCC), dtype=np.float32)
+            else:
+                mfcc = _compute_mfcc(wav, AUDIO_SR)
+                self._log.info(
+                    f"  {stem}: audio wav={wav.shape}  mfcc={mfcc.shape}"
+                    f"  mfcc_dur={len(mfcc)/100:.1f}s  video_dur={len(needed)/fps:.1f}s"
+                )
 
             sync_tracks = {}
             for track_id, detections in tracks.items():
@@ -325,45 +362,60 @@ class SyncNetWorker:
                 bboxes        = [d["bbox"]  for d in detections]
 
                 face_crops = []
+                n_missing = 0
                 for fi, bbox in zip(frame_indices, bboxes):
                     if fi in frame_cache:
                         face_crops.append(_crop_face(frame_cache[fi], bbox, CROP_PAD))
                     else:
                         face_crops.append(np.zeros((FACE_SIZE, FACE_SIZE), dtype=np.uint8))
+                        n_missing += 1
+
+                self._log.info(
+                    f"  {stem} track={track_id}: {len(frame_indices)} frames"
+                    f"  missing_frames={n_missing}"
+                    f"  face_size={face_crops[0].shape if face_crops else 'n/a'}"
+                )
 
                 conf, offset = _score_track(
                     face_crops, mfcc, frame_indices, fps,
                     self._model, self.device,
+                    debug_log=self._log.info,
                 )
 
+                passes = conf >= SYNC_THRESHOLD
                 sync_tracks[track_id] = {
                     "frames":     frame_indices,
                     "confidence": round(conf, 4),
                     "offset":     offset,
-                    "passes":     conf >= SYNC_THRESHOLD,
+                    "passes":     passes,
                 }
                 self._log.info(
-                    f"  track {track_id}: {len(frame_indices)} frames, "
-                    f"conf={conf:.2f}, passes={conf >= SYNC_THRESHOLD}"
+                    f"  {stem} track={track_id}: conf={conf:.3f}"
+                    f"  threshold={SYNC_THRESHOLD}  passes={passes}"
                 )
+
+            n_pass = sum(1 for t in sync_tracks.values() if t["passes"])
+            elapsed = time.perf_counter() - t0
+            self._log.info(
+                f"DONE {stem}: {len(sync_tracks)} tracks  {n_pass} pass  {elapsed:.1f}s"
+            )
 
             result = {
                 "path":   video_path,
                 "fps":    round(fps, 3),
                 "tracks": sync_tracks,
                 "status": "ok",
-                "time_s": round(time.perf_counter() - t0, 3),
+                "time_s": round(elapsed, 3),
             }
             Path(out_dir).mkdir(parents=True, exist_ok=True)
             out_path.write_text(json.dumps(result))
 
-            n_pass = sum(1 for t in sync_tracks.values() if t["passes"])
             return {"path": video_path, "status": "ok",
                     "n_tracks": len(sync_tracks), "n_pass": n_pass}
 
         except Exception as e:
             import traceback
-            self._log.error(f"FAILED {Path(video_path).name}\n{traceback.format_exc()}")
+            self._log.error(f"FAILED {stem}\n{traceback.format_exc()}")
             return {"path": video_path, "status": f"failed: {e}", "n_tracks": 0}
 
 
@@ -372,6 +424,7 @@ class SyncNetWorker:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
+    global SYNC_THRESHOLD
     ap = argparse.ArgumentParser()
     ap.add_argument("--video_dir",      required=True)
     ap.add_argument("--track_dir",      required=True)
@@ -382,7 +435,6 @@ def main():
                     help="Minimum SyncNet confidence to pass a track (default 5.0)")
     args = ap.parse_args()
 
-    global SYNC_THRESHOLD
     SYNC_THRESHOLD = args.sync_threshold
 
     track_dir = Path(args.track_dir)
@@ -393,12 +445,14 @@ def main():
         tp = track_dir / (v.stem + ".tracks.json")
         if tp.exists():
             runnable.append((str(v), str(tp)))
+            log.info(f"  queued: {v.name}")
         else:
-            log.warning(f"No track file for {v.name} — skipping")
+            log.warning(f"  SKIP {v.name}: no track file at {tp}")
 
     n_actors      = args.num_gpus * args.actors_per_gpu
     gpu_per_actor = 1.0 / args.actors_per_gpu
-    log.info(f"SyncNet scoring {len(runnable)} videos")
+    log.info(f"Found {len(videos)} videos  runnable={len(runnable)}")
+    log.info(f"track_dir={track_dir}  out_dir={args.out_dir}")
     log.info(f"Actors: {n_actors} ({args.actors_per_gpu}/GPU × {args.num_gpus} GPUs)")
 
     wandb.init(project="talking-characters", entity="rlx-labs",

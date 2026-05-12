@@ -217,6 +217,14 @@ def _export_clip(
 class SegmentWorker:
     def process(self, video_path: str, sync_path: str,
                 track_path: str, out_dir: str) -> dict:
+        stem = Path(video_path).name
+        done_marker = Path(out_dir) / Path(video_path).stem / ".done"
+        if done_marker.exists():
+            log.info(f"CACHED {stem}")
+            cached = json.loads(done_marker.read_text()) if done_marker.stat().st_size else []
+            return {"path": video_path, "status": "ok", "n_clips": len(cached), "clips": cached}
+
+        log.info(f"START {stem}")
         t0 = time.perf_counter()
         try:
             sync_data  = json.loads(Path(sync_path).read_text())
@@ -225,6 +233,18 @@ class SegmentWorker:
             fps         = float(sync_data.get("fps", 25.0))
             sync_tracks = sync_data.get("tracks", {})
             trk_tracks  = track_data.get("tracks", {})
+
+            # Log sync summary
+            n_pass = sum(1 for t in sync_tracks.values() if t.get("passes", False))
+            log.info(
+                f"  {stem}: fps={fps:.2f}  sync_tracks={len(sync_tracks)}"
+                f"  passing={n_pass}"
+            )
+            for tid, t in sync_tracks.items():
+                log.info(
+                    f"  {stem} track={tid}: conf={t.get('confidence', 'n/a'):.3f}"
+                    f"  passes={t.get('passes', False)}"
+                )
 
             import av
             frame_w, frame_h = 1280, 720
@@ -235,13 +255,31 @@ class SegmentWorker:
                     frame_h = s.height or frame_h
             except Exception:
                 pass
+            log.info(f"  {stem}: frame_size={frame_w}x{frame_h}")
 
             clips = _find_clips(sync_tracks, trk_tracks, fps)
+            log.info(
+                f"  {stem}: _find_clips → {len(clips)} candidate clips"
+                f"  (gap_bridge={GAP_BRIDGE_S}s  min={MIN_CLIP_S}s  max={MAX_CLIP_S}s)"
+            )
+            for i, c in enumerate(clips):
+                dur = (c["end_frame"] - c["start_frame"]) / fps
+                log.info(
+                    f"    clip[{i}]: track={c['track_id']}"
+                    f"  frames=[{c['start_frame']},{c['end_frame']}]"
+                    f"  dur={dur:.1f}s"
+                    f"  face_ratio={c['face_present_ratio']:.2f}"
+                    f"  sync_conf={c['sync_confidence']:.3f}"
+                )
+
             if not clips:
+                log.info(f"  {stem}: no clips passed all gates")
+                done_marker.parent.mkdir(parents=True, exist_ok=True)
+                done_marker.write_text("[]")
                 return {"path": video_path, "status": "ok", "n_clips": 0, "clips": []}
 
-            stem     = Path(video_path).stem
-            clip_dir = Path(out_dir) / stem
+            stem_base = Path(video_path).stem
+            clip_dir  = Path(out_dir) / stem_base
             clip_dir.mkdir(parents=True, exist_ok=True)
 
             written = []
@@ -249,19 +287,22 @@ class SegmentWorker:
                 tid   = clip["track_id"]
                 sf    = clip["start_frame"]
                 ef    = clip["end_frame"]
-                name  = f"{stem}_{tid}_{sf:06d}_{ef:06d}"
+                name  = f"{stem_base}_{tid}_{sf:06d}_{ef:06d}"
                 cpath = str(clip_dir / f"{name}.mp4")
                 mpath = clip_dir / f"{name}.json"
 
                 if mpath.exists():
+                    log.info(f"    {name}: already exported — reusing")
                     written.append(json.loads(mpath.read_text()))
                     continue
 
+                log.info(f"    exporting {name}  ({(ef-sf)/fps:.1f}s)")
                 ok, had_bars, had_other = _export_clip(
                     video_path, trk_tracks, tid, sf, ef, fps,
                     frame_w, frame_h, cpath,
                 )
                 if not ok:
+                    log.warning(f"    {name}: ffmpeg export FAILED")
                     continue
 
                 meta = {
@@ -282,13 +323,19 @@ class SegmentWorker:
                 }
                 mpath.write_text(json.dumps(meta, indent=2))
                 written.append(meta)
+                log.info(
+                    f"    {name}: OK  had_bars={had_bars}  had_other={had_other}"
+                )
 
+            elapsed = time.perf_counter() - t0
+            log.info(f"DONE {stem}: {len(written)} clips written  {elapsed:.1f}s")
+            done_marker.write_text(json.dumps(written))
             return {"path": video_path, "status": "ok",
                     "n_clips": len(written), "clips": written}
 
         except Exception as e:
             import traceback
-            log.error(f"FAILED {Path(video_path).name}\n{traceback.format_exc()}")
+            log.error(f"FAILED {stem}\n{traceback.format_exc()}")
             return {"path": video_path, "status": f"failed: {e}", "n_clips": 0, "clips": []}
 
 
@@ -319,10 +366,15 @@ def main():
         tp = track_dir / (v.stem + ".tracks.json")
         if sp.exists() and tp.exists():
             runnable.append((str(v), str(sp), str(tp)))
+            log.info(f"  queued: {v.name}")
         else:
-            log.warning(f"Missing sync or track file for {v.name} — skipping")
+            missing = []
+            if not sp.exists(): missing.append(f"sync={sp}")
+            if not tp.exists(): missing.append(f"track={tp}")
+            log.warning(f"  SKIP {v.name}: missing {', '.join(missing)}")
 
-    log.info(f"Exporting clips for {len(runnable)} videos  ({args.num_workers} workers)")
+    log.info(f"Found {len(videos)} videos  runnable={len(runnable)}  ({args.num_workers} workers)")
+    log.info(f"sync_dir={sync_dir}  track_dir={track_dir}  out_dir={args.out_dir}")
 
     wandb.init(project="talking-characters", entity="rlx-labs",
                name="segment-export", resume="allow",

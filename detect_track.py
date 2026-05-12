@@ -173,19 +173,25 @@ class DetectTrackWorker:
     def process(self, video_path: str, out_dir: str) -> dict:
         out_path = Path(out_dir) / (Path(video_path).stem + ".tracks.json")
         if out_path.exists():
+            self._log.info(f"CACHED {Path(video_path).name}")
             return {"path": video_path, "status": "cached"}
 
+        stem = Path(video_path).name
+        self._log.info(f"START {stem}")
         t0 = time.perf_counter()
         try:
             tracker: _ByteTracker | None = None
             tracks: dict[str, list] = {}
             fps = 25.0
             n_frames = 0
+            n_faces_total = 0
+            n_tiny_dropped = 0
 
             for frame_idx, frame, frame_fps in _stream_frames(video_path):
                 if tracker is None:
                     fps = frame_fps
                     tracker = _ByteTracker(fps)
+                    self._log.debug(f"  {stem}: fps={fps:.2f}  frame_shape={frame.shape}")
                 n_frames = frame_idx + 1
 
                 faces = self._detector.get(frame)
@@ -198,6 +204,7 @@ class DetectTrackWorker:
                     dtype=np.float32
                 )
                 result = tracker.update(dets, frame)
+                n_faces_total += len(result)
 
                 for row in result:
                     x1, y1, x2, y2 = float(row[0]), float(row[1]), float(row[2]), float(row[3])
@@ -205,6 +212,7 @@ class DetectTrackWorker:
                     score    = float(row[5]) if len(row) > 5 else 1.0
 
                     if (x2 - x1) < MIN_FACE_PX or (y2 - y1) < MIN_FACE_PX:
+                        n_tiny_dropped += 1
                         continue
 
                     key = str(track_id)
@@ -217,14 +225,32 @@ class DetectTrackWorker:
                         "score": round(score, 4),
                     })
 
+                if frame_idx % 500 == 0 and frame_idx > 0:
+                    self._log.info(
+                        f"  {stem}: frame={frame_idx}  active_tracks={len(tracks)}"
+                        f"  tiny_dropped={n_tiny_dropped}"
+                    )
+
             if n_frames == 0:
+                self._log.warning(f"  {stem}: 0 frames decoded — video unreadable?")
                 return {"path": video_path, "status": "failed: no frames",
                         "n_tracks": 0}
 
+            self._log.info(
+                f"  {stem}: decoded {n_frames} frames  total_face_dets={n_faces_total}"
+                f"  tiny_dropped={n_tiny_dropped}  raw_tracks={len(tracks)}"
+            )
+
             # Drop tracks with fewer than fps/2 detections (~0.5s)
             min_len = max(1, int(fps / 2))
+            before = len(tracks)
             tracks  = {k: v for k, v in tracks.items() if len(v) >= min_len}
+            self._log.info(
+                f"  {stem}: track filter min_frames={min_len}  "
+                f"kept={len(tracks)}/{before}"
+            )
 
+            elapsed = time.perf_counter() - t0
             result_data = {
                 "path":     video_path,
                 "fps":      round(fps, 3),
@@ -232,10 +258,11 @@ class DetectTrackWorker:
                 "n_tracks": len(tracks),
                 "tracks":   tracks,
                 "status":   "ok",
-                "time_s":   round(time.perf_counter() - t0, 3),
+                "time_s":   round(elapsed, 3),
             }
             Path(out_dir).mkdir(parents=True, exist_ok=True)
             out_path.write_text(json.dumps(result_data))
+            self._log.info(f"DONE {stem}  tracks={len(tracks)}  {elapsed:.1f}s")
             return {"path": video_path, "status": "ok", "n_tracks": len(tracks)}
 
         except Exception as e:
